@@ -151,7 +151,14 @@
     },
     "/sessions/{sessionId}/messages/audio": {
       "post": {
+        "tags": [
+          "Messages"
+        ],
+        "summary": "Audio → STT → AI → TTS",
         "description": "",
+        "consumes": [
+          "multipart/form-data"
+        ],
         "produces": [
           "audio/mpeg"
         ],
@@ -160,12 +167,33 @@
             "name": "sessionId",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "format": "uuid"
           },
           {
             "name": "stream",
             "in": "query",
-            "type": "string"
+            "required": false,
+            "type": "integer",
+            "enum": [
+              0,
+              1
+            ],
+            "default": 0
+          },
+          {
+            "name": "audio",
+            "in": "formData",
+            "type": "file",
+            "required": true,
+            "description": "Ses dosyası (field name: audio)"
+          },
+          {
+            "name": "language",
+            "in": "formData",
+            "type": "string",
+            "required": false,
+            "default": "tr"
           },
           {
             "name": "body",

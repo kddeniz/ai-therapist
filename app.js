@@ -26,7 +26,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 // ElevenLabs & OpenAI endpoint'leri (güncel dokümanınıza göre URL'leri teyit edin)
 const ELEVEN_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text";
 const ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech";
-const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "Rachel"; // bir voice id/ismi
+const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // bir voice id/ismi
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"; // Responses API kullanıyorsanız onu koyun
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
@@ -198,7 +198,27 @@ app.post("/sessions/:sessionId/messages", async (req, res) => {
   }
 });
 
-app.post("/sessions/:sessionId/messages/audio", upload.single("audio"), async (req, res) => {
+app.post("/sessions/:sessionId/messages/audio", upload.single("audio"), 
+  /* 
+    #swagger.tags = ['Messages']
+    #swagger.summary = 'Audio → STT → AI → TTS'
+    #swagger.consumes = ['multipart/form-data']
+
+    #swagger.parameters['sessionId'] = {
+      in: 'path', required: true, type: 'string', format: 'uuid'
+    }
+    #swagger.parameters['stream'] = {
+      in: 'query', required: false, type: 'integer', enum: [0,1], default: 0
+    }
+    #swagger.parameters['audio'] = {
+      in: 'formData', type: 'file', required: true, name: 'audio',
+      description: 'Ses dosyası (field name: audio)'
+    }
+    #swagger.parameters['language'] = {
+      in: 'formData', type: 'string', required: false, default: 'tr'
+    }
+  */
+  async (req, res) => {
   const client = await pool.connect();
   try {
     const { sessionId } = req.params;
@@ -211,7 +231,7 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"), async (r
 
     // 1) STT: ElevenLabs -> text
     // (Dokümanlarınıza göre content-type ve field isimleri farklı olabilir)
-    const sttResp = await fetch(ELEVEN_STT_URL, {
+    /*const sttResp = await fetch(ELEVEN_STT_URL, {
       method: "POST",
       headers: {
         "xi-api-key": process.env.ELEVEN_API_KEY,
@@ -221,6 +241,30 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"), async (r
         fd.append("file", new Blob([req.file.buffer]), req.file.originalname || "audio.webm");
         fd.append("model", "eleven_multilingual_v2"); // örnek model adı—dokümanınıza göre güncelleyin
         fd.append("language", language); // destekliyorsa
+        return fd;
+      })(),
+    });*/
+
+    const sttResp = await fetch(ELEVEN_STT_URL, {
+      method: "POST",
+      headers: { "xi-api-key": process.env.ELEVEN_API_KEY },
+      body: (() => {
+        const fd = new FormData();
+        // Dosya (ogg/wav/mp3) — mimetype'ı da verin
+        fd.append(
+          "file",
+          new Blob([req.file.buffer], { type: req.file.mimetype || "audio/ogg" }),
+          req.file.originalname || "audio.ogg"
+        );
+
+        // ZORUNLU: model_id (STT için Scribe v1)
+        fd.append("model_id", "scribe_v1");
+
+        // Opsiyonel ama doğru anahtar adı: language_code
+        if (language) fd.append("language_code", language);
+
+        // İsterseniz diğer opsiyonlar:
+        // fd.append("diarize", "false"); // konuşmacı ayrımı
         return fd;
       })(),
     });
