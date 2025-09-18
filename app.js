@@ -13,6 +13,8 @@ const { Pool } = require("pg");
 const PORT = process.env.PORT || 3000;
 const { v4: uuidv4 } = require("uuid"); // uuid kütüphanesini ekleyin (npm install uuid)
 const app = express();
+const swaggerUi = require('swagger-ui-express')
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL ? { rejectUnauthorized: false } : false
@@ -28,13 +30,30 @@ const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "Rachel"; // bir voice id
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"; // Responses API kullanıyorsanız onu koyun
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-
 app.use(express.json()); // JSON body okumak için
 
+// loading Swagger file
+let swaggerFile;
+try {
+  swaggerFile = require('./swagger_output.json');
+  console.log('Swagger file loaded successfully');
+  console.log('Swagger info:', swaggerFile?.info || 'No info found');
+} catch (error) {
+  console.error('Error loading swagger file:', error);
+  // Fallback swagger config
+  swaggerFile = {
+    openapi: "3.0.0",
+    info: {
+      title: "API Documentation",
+      version: "1.0.0"
+    },
+    paths: {}
+  };
+}
 
 
 app.get('/', (req, res) => {
-  res.send('Hello World!')
+  res.send('Hello World?!')
 })
 
 app.post("/clients", async (req, res) => {
@@ -302,14 +321,6 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"), async (r
   }
 });
 
-app.get("/env", (_req, res) => { //to be deleted
-  res.json({
-    NODE_ENV: process.env.NODE_ENV || null,
-    HAS_DB_URL: !!process.env.DATABASE_URL,
-    DATABASE_SSL: process.env.DATABASE_SSL || null
-  });
-});
-
 app.get("/clients", async (_req, res) => { //to be deleted
   try {
     const { rows } = await pool.query(
@@ -324,6 +335,15 @@ app.get("/clients", async (_req, res) => { //to be deleted
     res.status(500).json({ error: "internal_error" });
   }
 });
+
+// Swagger setup
+console.log('adding swagger')
+console.log(swaggerFile)
+app.use('/docs', swaggerUi.serve);
+app.get('/docs', swaggerUi.setup(swaggerFile, {
+  explorer: true,
+  customSiteTitle: "API Documentation"
+}));
 
 app.listen(PORT, () => {
   console.log(`Example app listening on port ${PORT}`)
