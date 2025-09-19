@@ -52,30 +52,48 @@ try {
 }
 
 //CORS setup
-// 🔓 allow-all CORS (no credentials)
-app.use((req, res, next) => {
-  // Origin kontrolü
-  const origin = req.headers.origin;
-  res.header('Access-Control-Allow-Origin', origin || '*');
-  // Credentials desteği (gerekirse)
-  res.header('Access-Control-Allow-Credentials', 'true');
-  // İzin verilen HTTP metodları
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD');
-  // İzin verilen header'lar
-  const requestHeaders = req.headers['access-control-request-headers'];
-  if (requestHeaders) {
-    res.header('Access-Control-Allow-Headers', requestHeaders);
-  } else {
-    res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,xi-api-key,Accept,Origin,X-Requested-With');
+const cors = require('cors');
+
+// .env dosyasından allowed origins'i al ve parse et
+const getAllowedOrigins = () => {
+  const originsEnv = process.env.ALLOWED_ORIGINS;
+  if (!originsEnv) {
+    console.warn('ALLOWED_ORIGINS env variable not found, using defaults');
+    return ['http://localhost:3000', 'http://localhost:5173'];
   }
-  // Preflight cache süresi
-  res.header('Access-Control-Max-Age', '86400'); // 24 saat
-  // Preflight OPTIONS isteğini handle et
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-  next();
-});
+  
+  // Virgülle ayrılmış string'i array'e çevir ve temizle
+  return originsEnv
+    .split(',')
+    .map(origin => origin.trim())
+    .filter(origin => origin.length > 0); // Boş string'leri filtrele
+};
+
+const allowedOrigins = getAllowedOrigins();
+console.log('Allowed Origins:', allowedOrigins);
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Development'ta origin undefined olabilir (Postman, mobile app vb.)
+    if (!origin) {
+      return callback(null, true);
+    }
+    
+    // İzin verilen origin'ler arasında kontrol et
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log(`CORS blocked origin: ${origin}`);
+      callback(new Error(`Origin ${origin} not allowed by CORS policy`));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'xi-api-key', 'Accept', 'Origin', 'X-Requested-With'],
+  maxAge: 86400 // 24 saat
+};
+
+app.use(cors(corsOptions));
 
 //routes
 
