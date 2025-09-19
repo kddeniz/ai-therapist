@@ -51,6 +51,27 @@ try {
   };
 }
 
+//CORS setup
+const cors = require('cors');
+
+// 1) Tüm isteklere CORS header'ları ekle
+app.use(cors({
+  origin: true, // gelen Origin'i yansıt (dev/test için pratik)
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','xi-api-key'],
+  credentials: false
+}));
+
+// 2) Preflight (OPTIONS) isteklerini kısa devre et (Express 5'te * kullanma!)
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204); // cors() zaten header'ları ekledi
+  }
+  next();
+});
+
+
+//routes
 
 app.get('/', (req, res) => {
   res.send('Hello World?!')
