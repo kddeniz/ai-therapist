@@ -54,14 +54,26 @@ try {
 //CORS setup
 // 🔓 allow-all CORS (no credentials)
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*'); // her origin serbest
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.header(
-    'Access-Control-Allow-Headers',
-    req.headers['access-control-request-headers'] || 'Content-Type,Authorization,xi-api-key'
-  );
-  // preflight'ı kısa devre et
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  // Origin kontrolü
+  const origin = req.headers.origin;
+  res.header('Access-Control-Allow-Origin', origin || '*');
+  // Credentials desteği (gerekirse)
+  res.header('Access-Control-Allow-Credentials', 'true');
+  // İzin verilen HTTP metodları
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD');
+  // İzin verilen header'lar
+  const requestHeaders = req.headers['access-control-request-headers'];
+  if (requestHeaders) {
+    res.header('Access-Control-Allow-Headers', requestHeaders);
+  } else {
+    res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,xi-api-key,Accept,Origin,X-Requested-With');
+  }
+  // Preflight cache süresi
+  res.header('Access-Control-Max-Age', '86400'); // 24 saat
+  // Preflight OPTIONS isteğini handle et
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
   next();
 });
 
