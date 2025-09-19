@@ -346,6 +346,146 @@
           }
         }
       }
+    },
+    "/therapists": {
+      "get": {
+        "tags": [
+          "Therapists"
+        ],
+        "summary": "Terapist listesini getir",
+        "description": "",
+        "parameters": [
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "type": "string",
+            "description": "İsim/açıklama arama (ILIKE)"
+          },
+          {
+            "name": "therapyTypeId",
+            "in": "query",
+            "type": "string",
+            "format": "uuid",
+            "description": "Terapi tipi filtresi"
+          },
+          {
+            "name": "gender",
+            "in": "query",
+            "type": "integer",
+            "enum": [
+              0,
+              1,
+              2
+            ],
+            "description": "0:unknown, 1:male, 2:female"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "type": "integer",
+            "default": 50,
+            "description": "Max 100"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "type": "integer",
+            "default": 0
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/clients/{clientId}/sessions": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Bir müşterinin tüm terapi seanslarını listele",
+        "description": "",
+        "parameters": [
+          {
+            "name": "clientId",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "type": "string",
+            "enum": [
+              "active",
+              "ended"
+            ],
+            "description": "active = ended IS NULL"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "type": "integer",
+            "default": 50
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "type": "integer",
+            "default": 0
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "type": "string",
+            "enum": [
+              "created_desc",
+              "created_asc"
+            ],
+            "default": "created_desc"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
     }
   }
 }

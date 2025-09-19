@@ -120,7 +120,6 @@ app.post("/clients", async (req, res) => {
   }
 });
 
-// app.js içine ekleyin
 app.post("/sessions", async (req, res) => {
   try {
     const { clientId, therapistId, price } = req.body;
@@ -385,7 +384,7 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
   }
 });
 
-app.get("/clients", async (_req, res) => { //to be deleted
+app.get("/clients", async (req, res) => { //to be deleted
   try {
     const { rows } = await pool.query(
       `SELECT id, username, language, gender, created
@@ -396,6 +395,145 @@ app.get("/clients", async (_req, res) => { //to be deleted
     res.json(rows);
   } catch (e) {
     console.error(e);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// GET /therapists  — liste + filtre + sayfalama
+app.get("/therapists", async (req, res) => {
+  /* 
+    #swagger.tags = ['Therapists']
+    #swagger.summary = 'Terapist listesini getir'
+    #swagger.parameters['q'] = { in: 'query', type: 'string', description: 'İsim/açıklama arama (ILIKE)' }
+    #swagger.parameters['therapyTypeId'] = { in: 'query', type: 'string', format: 'uuid', description: 'Terapi tipi filtresi' }
+    #swagger.parameters['gender'] = { in: 'query', type: 'integer', enum: [0,1,2], description: '0:unknown, 1:male, 2:female' }
+    #swagger.parameters['limit'] = { in: 'query', type: 'integer', default: 50, description: 'Max 100' }
+    #swagger.parameters['offset'] = { in: 'query', type: 'integer', default: 0 }
+    #swagger.responses[200] = { description: 'OK' }
+  */
+  try {
+    let { q, therapyTypeId, gender, limit = 50, offset = 0 } = req.query;
+
+    // basit validasyon
+    limit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+    offset = Math.max(parseInt(offset, 10) || 0, 0);
+
+    const where = [];
+    const params = [];
+    const add = (clause, val) => { params.push(val); where.push(`${clause} $${params.length}`); };
+
+    if (q && q.trim()) {
+      add("(t.name ILIKE '%' || $${i} || '%' OR t.description ILIKE '%' || $${i} || '%')".replaceAll("$${i}", `$${params.length+1}`), q.trim());
+      // yukarıdaki küçük numara: param indexini doğru artırmak için replace
+      // ama istersen şöyle de yazabiliriz (daha okunur):
+      params.push(q.trim());
+      where.push(`(t.name ILIKE '%' || $${params.length} || '%' OR t.description ILIKE '%' || $${params.length} || '%')`);
+    }
+    if (therapyTypeId) {
+      params.push(therapyTypeId);
+      where.push(`t.therapy_type_id = $${params.length}`);
+    }
+    if (gender !== undefined) {
+      const g = parseInt(gender, 10);
+      if ([0,1,2].includes(g)) {
+        params.push(g);
+        where.push(`t.gender = $${params.length}`);
+      }
+    }
+
+    const sql = `
+      SELECT
+        t.id,
+        t.name,
+        t.description,
+        t.gender,
+        t.therapy_type_id AS "therapyTypeId",
+        tt.name           AS "therapyTypeName"
+      FROM therapist t
+      LEFT JOIN therapy_type tt ON tt.id = t.therapy_type_id
+      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      ORDER BY t.name ASC
+      LIMIT $${params.length + 1}
+      OFFSET $${params.length + 2}
+    `;
+
+    params.push(limit, offset);
+    const { rows } = await pool.query(sql, params);
+
+    res.json({ items: rows, paging: { limit, offset, count: rows.length } });
+  } catch (e) {
+    console.error("list therapists error:", e);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// GET /clients/:clientId/sessions  — seans listesi (terapist + terapi tipi adı ile)
+app.get("/clients/:clientId/sessions", async (req, res) => {
+  /* 
+    #swagger.tags = ['Sessions']
+    #swagger.summary = 'Bir müşterinin tüm terapi seanslarını listele'
+    #swagger.parameters['clientId'] = { in: 'path', required: true, type: 'string', format: 'uuid' }
+    #swagger.parameters['status'] = { in: 'query', type: 'string', enum: ['active','ended'], description: 'active = ended IS NULL' }
+    #swagger.parameters['limit'] = { in: 'query', type: 'integer', default: 50 }
+    #swagger.parameters['offset'] = { in: 'query', type: 'integer', default: 0 }
+    #swagger.parameters['sort'] = { in: 'query', type: 'string', enum: ['created_desc','created_asc'], default: 'created_desc' }
+    #swagger.responses[200] = { description: 'OK' }
+  */
+  try {
+    const { clientId } = req.params;
+    let { status, limit = 50, offset = 0, sort = 'created_desc' } = req.query;
+
+    limit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+    offset = Math.max(parseInt(offset, 10) || 0, 0);
+    const order = sort === 'created_asc' ? 'ASC' : 'DESC';
+
+    const where = ['s.client_id = $1'];
+    const params = [clientId];
+
+    if (status === 'active') where.push('s.ended IS NULL');
+    if (status === 'ended')  where.push('s.ended IS NOT NULL');
+
+    const sql = `
+      SELECT
+        s.id,
+        s.created,
+        s.ended,
+        s.price,
+        s.therapist_id           AS "therapistId",
+        t.name                    AS "therapistName",
+        t.gender                  AS "therapistGender",
+        t.therapy_type_id         AS "therapyTypeId",
+        tt.name                   AS "therapyTypeName",
+        COUNT(*) OVER()           AS "total"
+      FROM session s
+      LEFT JOIN therapist t   ON t.id  = s.therapist_id
+      LEFT JOIN therapy_type tt ON tt.id = t.therapy_type_id
+      WHERE ${where.join(' AND ')}
+      ORDER BY s.created ${order}
+      LIMIT $2 OFFSET $3
+    `;
+
+    params.push(limit, offset);
+    const { rows } = await pool.query(sql, params);
+
+    const total = rows[0]?.total ? Number(rows[0].total) : 0;
+    // total yoksa (hiç kayıt yoksa) 0 döner
+    res.json({
+      items: rows.map(r => ({
+        id: r.id,
+        created: r.created,
+        ended: r.ended,
+        price: r.price,
+        therapistId: r.therapistId,
+        therapistName: r.therapistName,
+        therapistGender: r.therapistGender,
+        therapyTypeId: r.therapyTypeId,
+        therapyTypeName: r.therapyTypeName
+      })),
+      paging: { limit, offset, total }
+    });
+  } catch (e) {
+    console.error("list client sessions error:", e);
     res.status(500).json({ error: "internal_error" });
   }
 });
