@@ -24,6 +24,16 @@
         "description": "",
         "parameters": [
           {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          },
+          {
             "name": "x-forwarded-proto",
             "in": "header",
             "type": "string"
@@ -32,6 +42,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "204": {
+            "description": "No Content"
           },
           "500": {
             "description": "Internal Server Error"
@@ -42,9 +55,24 @@
     "/": {
       "get": {
         "description": "",
+        "parameters": [
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "204": {
+            "description": "No Content"
           }
         }
       }
@@ -53,6 +81,16 @@
       "post": {
         "description": "",
         "parameters": [
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          },
           {
             "name": "body",
             "in": "body",
@@ -76,6 +114,9 @@
           "201": {
             "description": "Created"
           },
+          "204": {
+            "description": "No Content"
+          },
           "400": {
             "description": "Bad Request"
           },
@@ -86,9 +127,24 @@
       },
       "get": {
         "description": "",
+        "parameters": [
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "204": {
+            "description": "No Content"
           },
           "500": {
             "description": "Internal Server Error"
@@ -100,6 +156,16 @@
       "post": {
         "description": "",
         "parameters": [
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          },
           {
             "name": "body",
             "in": "body",
@@ -123,6 +189,9 @@
           "201": {
             "description": "Created"
           },
+          "204": {
+            "description": "No Content"
+          },
           "400": {
             "description": "Bad Request"
           },
@@ -140,6 +209,16 @@
             "name": "sessionId",
             "in": "path",
             "required": true,
+            "type": "string"
+          },
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
             "type": "string"
           },
           {
@@ -161,6 +240,9 @@
         "responses": {
           "201": {
             "description": "Created"
+          },
+          "204": {
+            "description": "No Content"
           },
           "400": {
             "description": "Bad Request"
@@ -197,6 +279,16 @@
             "required": true,
             "type": "string",
             "format": "uuid"
+          },
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
           },
           {
             "name": "stream",
@@ -242,6 +334,9 @@
           },
           "201": {
             "description": "Created"
+          },
+          "204": {
+            "description": "No Content"
           },
           "400": {
             "description": "Bad Request"

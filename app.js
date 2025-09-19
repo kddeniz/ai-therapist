@@ -33,51 +33,30 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 app.use(express.json()); // JSON body okumak için
 
+app.use((req, res, next) => {
+  // Origin'i aynen yansıt (veya '*' de olur; cookie kullanmıyorsan fark etmez)
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Vary', 'Origin');
+
+  // İzin verilen metodlar
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+
+  // İzin verilen header'lar (Swagger/fetch'in gönderdiği tüm header'ları kapsa)
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    req.headers['access-control-request-headers'] || 'Content-Type,Authorization,xi-api-key'
+  );
+
+  // Credential kullanmıyorsan kapalı kalsın; gerekiyorsa 'true' yap ve Origin'i '*' değil spesifik yaz
+  // res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  // Preflight kısa devre
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+//swagger için lazım
 app.set('trust proxy', 1); // Render behind proxy -> doğru proto (https) için
-
-//CORS setup
-const cors = require('cors');
-
-// .env dosyasından allowed origins'i al ve parse et
-const getAllowedOrigins = () => {
-  const originsEnv = process.env.ALLOWED_ORIGINS;
-  if (!originsEnv) {
-    console.warn('ALLOWED_ORIGINS env variable not found, using defaults');
-    return ['http://localhost:3000', 'http://localhost:5173'];
-  }
-  
-  // Virgülle ayrılmış string'i array'e çevir ve temizle
-  return originsEnv
-    .split(',')
-    .map(origin => origin.trim())
-    .filter(origin => origin.length > 0); // Boş string'leri filtrele
-};
-
-const allowedOrigins = getAllowedOrigins();
-console.log('Allowed Origins:', allowedOrigins);
-
-const corsOptions = {
-  origin: function (origin, callback) {
-    // Development'ta origin undefined olabilir (Postman, mobile app vb.)
-    if (!origin) {
-      return callback(null, true);
-    }
-    
-    // İzin verilen origin'ler arasında kontrol et
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.log(`CORS blocked origin: ${origin}`);
-      callback(new Error(`Origin ${origin} not allowed by CORS policy`));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'xi-api-key', 'Accept', 'Origin', 'X-Requested-With'],
-  maxAge: 86400 // 24 saat
-};
-
-app.use(cors(corsOptions));
 
 //routes
 
