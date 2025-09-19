@@ -1,4 +1,5 @@
 // app.js
+const fs = require('fs');
 const path = require("path");
 
 // .env'yi dosyanın yanından, kesin yoldan yükle
@@ -32,24 +33,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 app.use(express.json()); // JSON body okumak için
 
-// loading Swagger file
-let swaggerFile;
-try {
-  swaggerFile = require('./swagger_output.json');
-  console.log('Swagger file loaded successfully');
-  console.log('Swagger info:', swaggerFile?.info || 'No info found');
-} catch (error) {
-  console.error('Error loading swagger file:', error);
-  // Fallback swagger config
-  swaggerFile = {
-    openapi: "3.0.0",
-    info: {
-      title: "API Documentation",
-      version: "1.0.0"
-    },
-    paths: {}
-  };
-}
+app.set('trust proxy', 1); // Render behind proxy -> doğru proto (https) için
 
 //CORS setup
 const cors = require('cors');
@@ -96,6 +80,34 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 //routes
+
+// JSON'u dinamik üret: host/proto'yu gelen isteğe göre doldur
+app.get('/openapi.json', (req, res) => {
+  try {
+    const spec = JSON.parse(
+      fs.readFileSync(path.join(__dirname, 'swagger_output.json'), 'utf8')
+    );
+
+    // İstekten gerçek host/proto’yu al
+    const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0];
+    const host = req.get('host'); // ör: myapp.onrender.com
+
+    if (spec.swagger === '2.0') {
+      // Swagger 2.0 (OAS2)
+      spec.host = host;            // DYNAMIC_BY_RUNTIME yerini alır
+      spec.basePath = spec.basePath || '/';
+      spec.schemes = [proto];      // http veya https
+    } else if (spec.openapi) {
+      // OpenAPI 3
+      spec.servers = [{ url: `${proto}://${host}` }];
+    }
+
+    res.json(spec);
+  } catch (e) {
+    console.error('openapi serve error:', e);
+    res.status(500).json({ error: 'openapi_load_failed' });
+  }
+});
 
 app.get('/', (req, res) => {
   res.send('Hello World?!')
@@ -274,22 +286,6 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
       return res.status(400).json({ error: "audio file missing (field name: audio)" });
     }
 
-    // 1) STT: ElevenLabs -> text
-    // (Dokümanlarınıza göre content-type ve field isimleri farklı olabilir)
-    /*const sttResp = await fetch(ELEVEN_STT_URL, {
-      method: "POST",
-      headers: {
-        "xi-api-key": process.env.ELEVEN_API_KEY,
-      },
-      body: (() => {
-        const fd = new FormData();
-        fd.append("file", new Blob([req.file.buffer]), req.file.originalname || "audio.webm");
-        fd.append("model", "eleven_multilingual_v2"); // örnek model adı—dokümanınıza göre güncelleyin
-        fd.append("language", language); // destekliyorsa
-        return fd;
-      })(),
-    });*/
-
     const sttResp = await fetch(ELEVEN_STT_URL, {
       method: "POST",
       headers: { "xi-api-key": process.env.ELEVEN_API_KEY },
@@ -426,13 +422,15 @@ app.get("/clients", async (_req, res) => { //to be deleted
 });
 
 // Swagger setup
-console.log('adding swagger')
-console.log(swaggerFile)
-app.use('/docs', swaggerUi.serve);
-app.get('/docs', swaggerUi.setup(swaggerFile, {
-  explorer: true,
-  customSiteTitle: "API Documentation"
-}));
+app.use(
+  '/docs',
+  swaggerUi.serve,
+  swaggerUi.setup(null, {
+    explorer: true,
+    customSiteTitle: 'API Documentation',
+    swaggerOptions: { url: '/openapi.json' }
+  })
+);
 
 app.listen(PORT, () => {
   console.log(`Example app listening on port ${PORT}`)
