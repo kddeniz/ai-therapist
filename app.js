@@ -54,19 +54,36 @@ try {
 //CORS setup
 const cors = require('cors');
 
-// 1) Tüm isteklere CORS header'ları ekle
+const ALLOWLIST = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+// onrender.com alt alan adlarını da kabul etmek istersen:
+function allowed(origin) {
+  if (!origin) return true; // curl/Postman
+  try {
+    const url = new URL(origin);
+    return (
+      ALLOWLIST.includes(origin) ||
+      url.hostname.endsWith('.onrender.com')
+    );
+  } catch { return false; }
+}
+
 app.use(cors({
-  origin: true, // gelen Origin'i yansıt (dev/test için pratik)
+  origin(origin, cb) {
+    if (allowed(origin)) return cb(null, true);
+    return cb(new Error('CORS not allowed'), false);
+  },
   methods: ['GET','POST','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization','xi-api-key'],
-  credentials: false
+  optionsSuccessStatus: 204
 }));
 
-// 2) Preflight (OPTIONS) isteklerini kısa devre et (Express 5'te * kullanma!)
+// Express 5'te genel OPTIONS için '*' kullanma; şöyle kısa devre et:
 app.use((req, res, next) => {
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204); // cors() zaten header'ları ekledi
-  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
