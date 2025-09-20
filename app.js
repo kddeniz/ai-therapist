@@ -443,7 +443,7 @@ End: nazik, kısa kapanış cümlesi serbest.
   ${PHASE_TEXT[phase] || PHASE_TEXT.intervention}
   `;
 
-  console.log('developer msg: ' + text)
+  //console.log('developer msg: ' + text)
   return text;
 }
 
@@ -478,6 +478,8 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
       return res.status(400).json({ error: "audio file missing (field name: audio)" });
     }
 
+    var timer = Date.now();
+
     const sttResp = await fetch(ELEVEN_STT_URL, {
       method: "POST",
       headers: { "xi-api-key": process.env.ELEVEN_API_KEY },
@@ -496,8 +498,10 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
         // Opsiyonel ama doğru anahtar adı: language_code
         if (language) fd.append("language_code", language);
 
-        // İsterseniz diğer opsiyonlar:
-        // fd.append("diarize", "false"); // konuşmacı ayrımı
+        fd.append("diarize", "false");                  // konuşmacı ayrımı kapalı
+        fd.append("num_speakers", "1");                 // tek konuşmacı varsay
+        fd.append("timestamps_granularity", "none");    // timestamp üretme
+        fd.append("tag_audio_events", "false");         // (laughter) gibi eventleri etiketleme
         return fd;
       })(),
     });
@@ -510,6 +514,9 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     const userText = sttJson.text || sttJson.transcript || ""; // alan adı dokümana göre değişebilir
     if (!userText) throw new Error("Empty transcript from STT");
 
+    console.log('s2t: ' + (Date.now() - timer))
+    timer = Date.now()
+
     // 2) DB: kullanıcının mesajını kaydet (transaction)
     await client.query("BEGIN");
     const insertUser = `
@@ -519,6 +526,9 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     `;
     const { rows: userRows } = await client.query(insertUser, [sessionId, language, userText]);
     const userMessageId = userRows[0].id;
+
+    console.log('insert user msg to db: ' + (Date.now() - timer))
+    timer = Date.now()
 
     //db'den session'ı al
     // ... try bloğunun içinde bir yerde (STT'den önce veya sonra kullanabilirsin):
@@ -584,6 +594,9 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     }));
     // sonra chatHistory'yi prompt'a dahil edebilirsin.
 
+    console.log('get session from db: ' + (Date.now() - timer))
+    timer = Date.now()
+
     // 3) OpenAI: yanıt al
     const MAX_MESSAGES = 30; // son 30 mesajı al (gerektiğinde arttır/azalt)
     const historyTail = chatHistory.slice(-MAX_MESSAGES); // [{role, content}, ...]
@@ -599,7 +612,8 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
 
     const payload = {
       model: OPENAI_MODEL,
-      temperature: 0.3,
+      temperature: 0.2,
+      top_p: 0.8, // ↓ düşük ihtimalleri kırpar -> hız
       messages: [
         { role: "system", content: buildSystemPrompt() },
         { role: "system", content: buildDeveloperMessage(sessionData) },
@@ -624,6 +638,9 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     const aiText = aiJson.choices?.[0]?.message?.content?.trim() || "";
     if (!aiText) throw new Error("Empty AI response");
 
+    console.log('open ai response: ' + (Date.now() - timer))
+    timer = Date.now()
+
     // 4) DB: AI mesajını kaydet
     const insertAi = `
       INSERT INTO message (session_id, created, language, is_client, content)
@@ -633,6 +650,9 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     const { rows: aiRows } = await client.query(insertAi, [sessionId, language, aiText]);
     const aiMessageId = aiRows[0].id;
     await client.query("COMMIT");
+
+    console.log('insert assistant msg to db: ' + (Date.now() - timer))
+    timer = Date.now()
 
     // 5) TTS: ElevenLabs -> ses
     const ttsResp = await fetch(`${ELEVEN_TTS_URL}/${encodeURIComponent(ELEVEN_VOICE_ID)}`, {
@@ -644,7 +664,9 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
       body: JSON.stringify({
         text: aiText,
         voice_settings: { stability: 0.5, similarity_boost: 0.75 }, // isteğe göre
-        model_id: "eleven_multilingual_v2" // dokümanınıza göre
+        //model_id: "eleven_multilingual_v2" // dokümanınıza göre
+        model_id: "eleven_flash_v2_5",          // ↓ hız odaklı model
+        output_format: "mp3_22050_32"          // ↓ küçük dosya
       })
     });
     if (!ttsResp.ok) {
@@ -653,6 +675,9 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     }
     const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
 
+    console.log('t2s: ' + (Date.now() - timer))
+    timer = Date.now()
+
     // 6) Yanıt: İsteğe göre stream ya da base64
     if (streamAudio) {
       res.setHeader("Content-Type", "audio/mpeg"); // ElevenLabs genelde mp3 verir
@@ -660,6 +685,10 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
       return res.send(audioBuffer);
     } else {
       const b64 = audioBuffer.toString("base64");
+
+      console.log('audio buffer: ' + (Date.now() - timer))
+      timer = Date.now()
+
       return res.status(201).json({
         sessionId,
         userMessageId,
