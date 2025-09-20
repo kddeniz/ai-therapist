@@ -243,6 +243,9 @@
         "consumes": [
           "multipart/form-data"
         ],
+        "produces": [
+          "audio/mpeg"
+        ],
         "parameters": [
           {
             "name": "sessionId",
@@ -300,11 +303,23 @@
           }
         ],
         "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "201": {
+            "description": "Created"
+          },
           "204": {
             "description": "No Content"
           },
           "400": {
             "description": "Bad Request"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "description": "Internal Server Error"
           }
         }
       }

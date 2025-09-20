@@ -334,38 +334,118 @@ function buildSystemPrompt() {
   * Karma belirti/ruminasyon → UP döngüsü (tetikleyici→değerlendirme yanlılığı→kaçınma→deney).
   * Değer karmaşası/duyguyla mücadele → ACT mikro (defusion + değer adımı).
   * Duygu dalgalanması/kriz → DBT kısa beceriler (nefes 4-4-6, 5 duyu).
-- Yanıt kalıbı: (1) kısa yansıtma (1–2 cümle) → (2) CBT çerçeveleme → (3) SEÇİLEN TEK TEKNİĞİ 3–5 sözlü adımda uygula → (4) tek ölçüm (0–10/0–100) → (5) tek kontrol sorusu (devam/derinleş?).
+- Yanıt kalıbı: 
+  1. Kullanıcının söylediklerini kısaca yansıt (1–2 cümle). 
+  2. Terapi modeline göre çerçevele. 
+  3. O an için **tek uygun teknik** seç ve 3–5 adımda uygula. 
+  4. **Ölçüm sorularını sadece kritik noktalarda sor**: 
+     - seans başında genel duygu skoru, 
+     - bir tekniğin tamamlandığında öncesi/sonrası kıyas için, 
+     - seans sonunda kapanışta. 
+     Arada her cevaptan sonra sorma.
+  5. Yanıtı daima doğal, konuşma akışına uygun açık uçlu bir soruyla bitir (“Bunu deneyince sizde nasıl bir etki oldu?”, “Burada devam etmek mi istersiniz, yoksa biraz farklı bir açıya bakalım mı?”).
 `;
 }
 
 /** ====== Developer Message Builder ====== */
 function buildDeveloperMessage(sessionData) {
-  console.log(Date.now())
-  console.log(sessionData.created)
-  console.log((Date.now() - sessionData.created) / 60000)
-  const elapsedMin = (Date.now() - sessionData.created) / 60000;
+  const elapsedMin = (Date.now() - new Date(sessionData.created).getTime()) / 60000;
   const phase = schedulePhase(elapsedMin);
   const remainingMin = Math.max(0, 45 - elapsedMin);
 
-  const dev = {
-    phase,
-    elapsed_min: +elapsedMin.toFixed(2),
-    remaining_min: +remainingMin.toFixed(2),
-    rules: {
-      max_questions_per_reply: 2,
-      target_speech_sec: "30-60",
-      voice_only: true,
-      writing_tasks_forbidden: true,
-    },
+  const rules = {
+    max_questions_per_reply: 2,
+    target_speech_sec: "30-60",
+    voice_only: true,
+    writing_tasks_forbidden: true,
   };
 
-  // Metne dök
-  let text = `[DEVELOPER] — Session Orchestrator\n`;
-  text += `phase=${dev.phase}, elapsed_min=${dev.elapsed_min}, remaining_min=${dev.remaining_min}\n`;
-  text += `rules=${JSON.stringify(dev.rules)}\n`;
+  // İsteğe bağlı bağlam
+  const therapistName = sessionData?.therapist?.name || "N/A";
+  const therapyTypeName = sessionData?.therapist?.therapyTypeName || sessionData?.therapist?.therapyType || "N/A";
+  const clientLang = sessionData?.messages?.[0]?.language || "tr";
+
+  // Faz bazlı direktifler
+  const PHASE_TEXT = {
+    warmup: `
+Goal: kısa ısınma ve güven; duyguyu yansıt.
+Do: 1–2 kısa açık uçlu soru; doğrulayıcı, sıcak ton.
+Don’t: çözüm/ödev/kapanışa gitme.
+End: tek kısa check-in sorusu.
+
+ABSOLUTE BAN: kapanış/veda/gelecek seans iması YOK ("kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim").
+`,
+
+    mapping: `
+Goal: durumu haritala (olay–düşünce–duygu–beden–davranış).
+Do: 1 somut örnek iste; 1–2 soru ile ilişkileri netleştir.
+Don’t: teşhis/etiket, kapanış dili.
+End: tek kısa check-in sorusu.
+
+ABSOLUTE BAN: kapanış/veda/gelecek seans iması YOK ("kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim").
+`,
+
+    intervention: `
+Goal: hedefe yönelik küçük bir müdahale (Sokratik sorgulama / yeniden çerçeveleme / maruz bırakmaya hazırlık vb.).
+Do: tek bir mikro adım; örnek cümlelerle yönlendir.
+Don’t: uzun plan/ödev, kapanış dili.
+End: tek kısa check-in sorusu.
+
+ABSOLUTE BAN: kapanış/veda/gelecek seans iması YOK ("kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim").
+`,
+
+    skill: `
+Goal: şimdi birlikte mikro-beceri uygulat (örn. 4-7 nefes, 5-4-3-2-1 grounding).
+Do: adım adım yönlendir; yavaş, sakin tempo; 30–60 sn.
+Don’t: kapanış dili, uzun teori.
+End: tek kısa check-in sorusu ("bunu deneyelim mi?").
+
+Forbid (kesinlikle kullanma):
+- "kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim".
+- Gelecek seans/ödev/kapanış iması veya vedalaşma.
+
+ABSOLUTE BAN: kapanış/veda/gelecek seans iması YOK ("kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim").
+`,
+
+    relapse_plan: `
+Goal: tetikleyici/erken uyarı ve “if–then” mini plan.
+Do: 24 saat içinde uygulanacak 1 çok küçük adım; olası engel+ karşı hamle.
+Don’t: kapanış dili.
+End: tek kısa check-in sorusu.
+
+ABSOLUTE BAN: kapanış/veda/gelecek seans iması YOK ("kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim").
+`,
+
+    closing: `
+Goal: 1–2 cümle mini özet + bir sonraki küçük adımı teyit + nazik kapanış.
+Do: çabayı takdir et, net bir sonraki adım belirt.
+End: nazik, kısa kapanış cümlesi serbest.
+`,
+  };
+
+  // Kapanış dışındaki fazlarda kapanış yasağını netleştir
+  const noCloseNote = phase === "closing"
+    ? ""
+    : "Hard ban: kapanış/kapatma ima eden dil kullanma (örn. “bugünlük bu kadar”, “kapatmadan önce…”, “görüşmeyi burada bitirelim”).";
+
+  // Ana sistem metni
+  let text = `[DEVELOPER] — Session Orchestrator
+  phase=${phase}
+  elapsed_min=${+elapsedMin.toFixed(2)}
+  remaining_min=${+remainingMin.toFixed(2)}
+  rules=${JSON.stringify(rules)}
+
+  You are a therapy assistant. Respond in the client's language (default ${clientLang}). Spoken, concise tone; avoid lists unless necessary.
+  Context: therapist=${therapistName}, therapy_type=${therapyTypeName}.
+
+  ${noCloseNote}
+  PHASE DIRECTIVES:
+  ${PHASE_TEXT[phase] || PHASE_TEXT.intervention}
+  `;
+
+  console.log('developer msg: ' + text)
   return text;
 }
-
 
 app.post("/sessions/:sessionId/messages/audio", upload.single("audio"), 
   /* 
