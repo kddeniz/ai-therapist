@@ -361,12 +361,8 @@ function buildDeveloperMessage(sessionData) {
 
   // Metne dök
   let text = `[DEVELOPER] — Session Orchestrator\n`;
-  text += `phase=${dev.phase}, elapsed_min=${dev.elapsed_min}, remaining_min=${dev.remaining_min}, early_close_guard=${dev.early_close_guard}, active_module=${dev.active_module}\n`;
-  text += `slots=${JSON.stringify(dev.slots)}\n`;
+  text += `phase=${dev.phase}, elapsed_min=${dev.elapsed_min}, remaining_min=${dev.remaining_min}\n`;
   text += `rules=${JSON.stringify(dev.rules)}\n`;
-  if (dev.early_close_guard) {
-    text += `\nIf early_close_guard==true:\n- Do NOT close/summarize/propose next session.\n- Continue current phase with ONE technique and ONE control question.\n`;
-  }
   return text;
 }
 
