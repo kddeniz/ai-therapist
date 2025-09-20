@@ -33,6 +33,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 app.use(express.json()); // JSON body okumak için
 
+//CORS setup
 app.use((req, res, next) => {
   // Origin'i aynen yansıt (veya '*' de olur; cookie kullanmıyorsan fark etmez)
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
@@ -171,31 +172,100 @@ app.post("/sessions/:sessionId/messages", async (req, res) => {
     const { rows: userRows } = await pool.query(insertUser, [sessionId, language, text.trim()]);
     const userMessageId = userRows[0].id;
 
-    // (Opsiyonel) Son konuşma geçmişini modele göndermek isteyebilirsiniz:
-    // const history = await pool.query(
-    //   `SELECT is_client, content FROM message WHERE session_id=$1 ORDER BY created ASC LIMIT 30`, [sessionId]
-    // );
-    // const chat = history.rows.map(r => ({ role: r.is_client ? "user" : "assistant", content: r.content }));
+    // ... try bloğunun içinde bir yerde (STT'den önce veya sonra kullanabilirsin):
+    // 0) Session meta + terapist + terapi tipi
+    const { rows: metaRows } = await pool.query(`
+      SELECT
+        s.id,
+        s.client_id AS "clientId",
+        s.therapist_id AS "therapistId",
+        s.created,
+        s.ended,
+        s.price,
+        t.name AS "therapistName",
+        t.gender AS "therapistGender",
+        t.therapy_type_id AS "therapyTypeId",
+        tt.name AS "therapyTypeName"
+      FROM session s
+      LEFT JOIN therapist t   ON t.id  = s.therapist_id
+      LEFT JOIN therapy_type tt ON tt.id = t.therapy_type_id
+      WHERE s.id = $1
+      LIMIT 1
+    `, [sessionId]);
 
+    if (metaRows.length === 0) {
+      return res.status(404).json({ error: "session_not_found" });
+    }
+    const meta = metaRows[0];
+
+    // 1) Mesajları kronolojik sırayla çek (en eski -> en yeni)
+    const { rows: msgRows } = await pool.query(`
+      SELECT
+        id,
+        created,
+        language,
+        is_client AS "isClient",
+        content
+      FROM message
+      WHERE session_id = $1
+      ORDER BY created ASC
+    `, [sessionId]);
+
+    // 2) İstediğin tek JS objesi
+    const sessionData = {
+      id: meta.id,
+      created: meta.created, // seans başlangıç zamanı
+      ended: meta.ended,
+      price: meta.price,
+      clientId: meta.clientId,
+      therapist: {
+        id: meta.therapistId,
+        name: meta.therapistName,
+        gender: meta.therapistGender,
+        therapyTypeId: meta.therapyTypeId,
+        therapyTypeName: meta.therapyTypeName
+      },
+      messages: msgRows // [{ id, created, language, isClient, content }, ...]
+    };
+
+    // (Opsiyonel) OpenAI'a geçmiş + yeni mesajla gideceksen:
+    const chatHistory = sessionData.messages.map(m => ({
+      role: m.isClient ? "user" : "assistant",
+      content: m.content
+    }));
+    // sonra chatHistory'yi prompt'a dahil edebilirsin.
+
+    
     // 2) OpenAI’dan yanıt al
+    const MAX_MESSAGES = 30; // son 30 mesajı al (gerektiğinde arttır/azalt)
+    const historyTail = chatHistory.slice(-MAX_MESSAGES); // [{role, content}, ...]
+
+    // (İsteğe bağlı) çok uzunluk kontrolü basitçe karaktere göre:
+    let totalChars = 0;
+    const trimmed = [];
+    for (let i = historyTail.length - 1; i >= 0; i--) {
+      totalChars += (historyTail[i].content || "").length;
+      if (totalChars > 8000) break;
+      trimmed.unshift(historyTail[i]); // başa ekle
+    }
+
+    const payload = {
+      model: OPENAI_MODEL,
+      temperature: 0.3,
+      messages: [
+        { role: "system", content: buildSystemPrompt() },
+        { role: "system", content: buildDeveloperMessage(sessionData) },
+        ...trimmed
+      ]
+    };
+
     const aiResp = await fetch(OPENAI_API_URL, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are an empathetic therapy assistant. Be concise, supportive, and practical. Avoid diagnosis; offer gentle coping strategies and next steps."
-          },
-          // ...chat, // geçmişi kullanacaksanız burayı açın
-          { role: "user", content: text.trim() }
-        ]
-      })
+      body: JSON.stringify(payload),
     });
 
     if (!aiResp.ok) {
@@ -232,6 +302,74 @@ app.post("/sessions/:sessionId/messages", async (req, res) => {
     return res.status(500).json({ error: "internal_error" });
   }
 });
+
+//*****
+// the algorithm
+//
+
+/** ====== Faz Planı (≈45 dk) ====== */
+const PHASES = ["warmup", "mapping", "intervention", "skill", "relapse_plan", "closing"];
+
+function schedulePhase(elapsedMin) {
+  if (elapsedMin < 3) return "warmup";
+  if (elapsedMin < 8) return "mapping";
+  if (elapsedMin < 35) return "intervention";
+  if (elapsedMin < 43) return "skill";
+  if (elapsedMin < 44.5) return "relapse_plan";
+  return "closing";
+}
+
+/** ====== System Prompt (kısaltılmış, voice-only, güvenlik dahil) ====== */
+function buildSystemPrompt() {
+  return `
+[SYSTEM] — Entegre Sesli Terapi Koçu (CBT-UP + BA çekirdek, voice-only)
+- Yaklaşımlar: Transdiyagnostik CBT (Unified Protocol) + Davranışsal Aktivasyon; gerektiğinde ACT mikro-beceriler, Maruz Bırakma (mikro-EXPOSURE), DBT kısa beceriler.
+- Ses: 30–60 sn yanıt, en fazla 2 soru; barge-in olduğunda dur; yazı/jurnal/form ödevi verme.
+- Güvenlik: kırmızı bayrakta akışı kes ve kısaca 112/acil yönlendirmesi yap; “Şu an güvende misiniz?” tek sorusunu sor; tetikleyici detaylardan kaçın.
+- Süre politikası: ≈45 dk hedeftir. 44 dk dolmadan kapanış/özet/“bir sonraki seans” deme; yalnızca kullanıcı isterse, kriz varsa veya süre bitince kapat.
+- Faz akışı: warmup → mapping → intervention (tek teknik) → skill → relapse_plan → closing.
+- Teknik seçim ipucu:
+  * Depresyon/düşük enerji → BA.
+  * Kaçınma/fobi/panik → mikro-EXPOSURE.
+  * Karma belirti/ruminasyon → UP döngüsü (tetikleyici→değerlendirme yanlılığı→kaçınma→deney).
+  * Değer karmaşası/duyguyla mücadele → ACT mikro (defusion + değer adımı).
+  * Duygu dalgalanması/kriz → DBT kısa beceriler (nefes 4-4-6, 5 duyu).
+- Yanıt kalıbı: (1) kısa yansıtma (1–2 cümle) → (2) CBT çerçeveleme → (3) SEÇİLEN TEK TEKNİĞİ 3–5 sözlü adımda uygula → (4) tek ölçüm (0–10/0–100) → (5) tek kontrol sorusu (devam/derinleş?).
+`;
+}
+
+/** ====== Developer Message Builder ====== */
+function buildDeveloperMessage(sessionData) {
+  console.log(Date.now())
+  console.log(sessionData.created)
+  console.log((Date.now() - sessionData.created) / 60000)
+  const elapsedMin = (Date.now() - sessionData.created) / 60000;
+  const phase = schedulePhase(elapsedMin);
+  const remainingMin = Math.max(0, 45 - elapsedMin);
+
+  const dev = {
+    phase,
+    elapsed_min: +elapsedMin.toFixed(2),
+    remaining_min: +remainingMin.toFixed(2),
+    rules: {
+      max_questions_per_reply: 2,
+      target_speech_sec: "30-60",
+      voice_only: true,
+      writing_tasks_forbidden: true,
+    },
+  };
+
+  // Metne dök
+  let text = `[DEVELOPER] — Session Orchestrator\n`;
+  text += `phase=${dev.phase}, elapsed_min=${dev.elapsed_min}, remaining_min=${dev.remaining_min}, early_close_guard=${dev.early_close_guard}, active_module=${dev.active_module}\n`;
+  text += `slots=${JSON.stringify(dev.slots)}\n`;
+  text += `rules=${JSON.stringify(dev.rules)}\n`;
+  if (dev.early_close_guard) {
+    text += `\nIf early_close_guard==true:\n- Do NOT close/summarize/propose next session.\n- Continue current phase with ONE technique and ONE control question.\n`;
+  }
+  return text;
+}
+
 
 app.post("/sessions/:sessionId/messages/audio", upload.single("audio"), 
   /* 
@@ -306,21 +444,102 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     const { rows: userRows } = await client.query(insertUser, [sessionId, language, userText]);
     const userMessageId = userRows[0].id;
 
+    //db'den session'ı al
+    // ... try bloğunun içinde bir yerde (STT'den önce veya sonra kullanabilirsin):
+    // 0) Session meta + terapist + terapi tipi
+    const { rows: metaRows } = await client.query(`
+      SELECT
+        s.id,
+        s.client_id AS "clientId",
+        s.therapist_id AS "therapistId",
+        s.created,
+        s.ended,
+        s.price,
+        t.name AS "therapistName",
+        t.gender AS "therapistGender",
+        t.therapy_type_id AS "therapyTypeId",
+        tt.name AS "therapyTypeName"
+      FROM session s
+      LEFT JOIN therapist t   ON t.id  = s.therapist_id
+      LEFT JOIN therapy_type tt ON tt.id = t.therapy_type_id
+      WHERE s.id = $1
+      LIMIT 1
+    `, [sessionId]);
+
+    if (metaRows.length === 0) {
+      return res.status(404).json({ error: "session_not_found" });
+    }
+    const meta = metaRows[0];
+
+    // 1) Mesajları kronolojik sırayla çek (en eski -> en yeni)
+    const { rows: msgRows } = await client.query(`
+      SELECT
+        id,
+        created,
+        language,
+        is_client AS "isClient",
+        content
+      FROM message
+      WHERE session_id = $1
+      ORDER BY created ASC
+    `, [sessionId]);
+
+    // 2) İstediğin tek JS objesi
+    const sessionData = {
+      id: meta.id,
+      created: meta.created, // seans başlangıç zamanı
+      ended: meta.ended,
+      price: meta.price,
+      clientId: meta.clientId,
+      therapist: {
+        id: meta.therapistId,
+        name: meta.therapistName,
+        gender: meta.therapistGender,
+        therapyTypeId: meta.therapyTypeId,
+        therapyTypeName: meta.therapyTypeName
+      },
+      messages: msgRows // [{ id, created, language, isClient, content }, ...]
+    };
+
+    // (Opsiyonel) OpenAI'a geçmiş + yeni mesajla gideceksen:
+    const chatHistory = sessionData.messages.map(m => ({
+      role: m.isClient ? "user" : "assistant",
+      content: m.content
+    }));
+    // sonra chatHistory'yi prompt'a dahil edebilirsin.
+
     // 3) OpenAI: yanıt al
+    const MAX_MESSAGES = 30; // son 30 mesajı al (gerektiğinde arttır/azalt)
+    const historyTail = chatHistory.slice(-MAX_MESSAGES); // [{role, content}, ...]
+
+    // (İsteğe bağlı) çok uzunluk kontrolü basitçe karaktere göre:
+    let totalChars = 0;
+    const trimmed = [];
+    for (let i = historyTail.length - 1; i >= 0; i--) {
+      totalChars += (historyTail[i].content || "").length;
+      if (totalChars > 8000) break;
+      trimmed.unshift(historyTail[i]); // başa ekle
+    }
+
+    const payload = {
+      model: OPENAI_MODEL,
+      temperature: 0.3,
+      messages: [
+        { role: "system", content: buildSystemPrompt() },
+        { role: "system", content: buildDeveloperMessage(sessionData) },
+        ...trimmed
+      ]
+    };
+
     const aiResp = await fetch(OPENAI_API_URL, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        messages: [
-          { role: "system", content: "You are a helpful therapy assistant. Be empathetic, brief, and actionable. Avoid medical claims; suggest coping strategies." },
-          { role: "user", content: userText }
-        ]
-      })
+      body: JSON.stringify(payload),
     });
+
     if (!aiResp.ok) {
       const txt = await aiResp.text().catch(() => "");
       throw new Error(`OpenAI failed: ${aiResp.status} ${txt}`);
@@ -381,21 +600,6 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     res.status(500).json({ error: "internal_error", detail: String(err.message || err) });
   } finally {
     client.release();
-  }
-});
-
-app.get("/clients", async (req, res) => { //to be deleted
-  try {
-    const { rows } = await pool.query(
-      `SELECT id, username, language, gender, created
-       FROM client
-       ORDER BY created DESC
-       LIMIT 50`
-    );
-    res.json(rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "internal_error" });
   }
 });
 
