@@ -337,7 +337,7 @@ function buildSystemPrompt() {
     - Sohbet geçmişinde veya verilen PROFILE_STATUS’ta olan alanı **yeniden sorma**.
     - İlk turlarda “mikro-intake” uygula: azami 1–2 kısa soru; güvenlik ve uygulanabilirlik öncelikli (tıbbi kontra → iş/zaman → aile → hedef → boy/kilo yalnızca uygun olduğunda).
     - Kullanıcı istemezse saygıyla atla; alternatif güvenli pratik öner.
-    - Her turda yeni netleşen alanlar varsa, meta blokta `PROFILE_UPDATE` satırında **kısa** key=value olarak ver.
+    - Her turda yeni netleşen alanlar varsa, meta blokta PROFILE_UPDATE satırında **kısa** key=value olarak ver.
 
     BOUNDARIES & SAFETY
     - Tıbbi/ilaç tavsiyesi yok; teşhis yok. Güvensizlikte en güvenli varyantı seç.
