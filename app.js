@@ -623,7 +623,7 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
         s.price,
         t.name AS "therapistName",
         t.gender AS "therapistGender",
-        t.voice_id AS "voiceId",
+        t.voice_id AS "voiceId"
       FROM session s
       LEFT JOIN client c ON c.id = s.client_id
       LEFT JOIN therapist t   ON t.id  = s.therapist_id
@@ -794,7 +794,6 @@ app.get("/therapists", async (req, res) => {
     #swagger.tags = ['Therapists']
     #swagger.summary = 'Terapist listesini getir'
     #swagger.parameters['q'] = { in: 'query', type: 'string', description: 'İsim/açıklama arama (ILIKE)' }
-    #swagger.parameters['therapyTypeId'] = { in: 'query', type: 'string', format: 'uuid', description: 'Terapi tipi filtresi' }
     #swagger.parameters['gender'] = { in: 'query', type: 'integer', enum: [0,1,2], description: '0:unknown, 1:male, 2:female' }
     #swagger.parameters['limit'] = { in: 'query', type: 'integer', default: 50, description: 'Max 100' }
     #swagger.parameters['offset'] = { in: 'query', type: 'integer', default: 0 }
