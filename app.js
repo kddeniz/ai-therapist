@@ -27,7 +27,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 // ElevenLabs & OpenAI endpoint'leri (güncel dokümanınıza göre URL'leri teyit edin)
 const ELEVEN_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text";
 const ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech";
-const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // bir voice id/ismi
+//const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // bir voice id/ismi
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"; // Responses API kullanıyorsanız onu koyun
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
@@ -184,11 +184,9 @@ app.post("/sessions/:sessionId/messages", async (req, res) => {
         s.price,
         t.name AS "therapistName",
         t.gender AS "therapistGender",
-        t.therapy_type_id AS "therapyTypeId",
-        tt.name AS "therapyTypeName"
+        t.voice_id as "voiceId"
       FROM session s
       LEFT JOIN therapist t   ON t.id  = s.therapist_id
-      LEFT JOIN therapy_type tt ON tt.id = t.therapy_type_id
       WHERE s.id = $1
       LIMIT 1
     `, [sessionId]);
@@ -222,8 +220,7 @@ app.post("/sessions/:sessionId/messages", async (req, res) => {
         id: meta.therapistId,
         name: meta.therapistName,
         gender: meta.therapistGender,
-        therapyTypeId: meta.therapyTypeId,
-        therapyTypeName: meta.therapyTypeName
+        voiceId: meta.voiceId
       },
       messages: msgRows // [{ id, created, language, isClient, content }, ...]
     };
@@ -306,18 +303,6 @@ app.post("/sessions/:sessionId/messages", async (req, res) => {
 //*****
 // the algorithm
 //
-
-/** ====== Faz Planı (≈45 dk) ====== */
-const PHASES = ["warmup", "mapping", "intervention", "skill", "relapse_plan", "closing"];
-
-function schedulePhase(elapsedMin) {
-  if (elapsedMin < 3) return "warmup";
-  if (elapsedMin < 8) return "mapping";
-  if (elapsedMin < 35) return "intervention";
-  if (elapsedMin < 43) return "skill";
-  if (elapsedMin < 44.5) return "relapse_plan";
-  return "closing";
-}
 
 /** ====== System Prompt (kısaltılmış, voice-only, güvenlik dahil) ====== */
 function buildSystemPrompt() {
@@ -405,107 +390,15 @@ FAIL-SAFES
 
 /** ====== Developer Message Builder ====== */
 function buildDeveloperMessage(sessionData) {
-  const elapsedMin = (Date.now() - new Date(sessionData.created).getTime()) / 60000;
-  const phase = schedulePhase(elapsedMin);
-  const remainingMin = Math.max(0, 45 - elapsedMin);
-
-  const rules={
-    "target_turn_len_sec": "30-60",
-    "max_questions_per_reply": 1,
-    "ask_rate":" <=1 per 2 turns",           // arka arkaya soru yok
-    "prefer_invite": true,                   // soru yerine davet tercih
-    "voice_only": true,
-    "writing_tasks_forbidden": true
-  };
-
 
   // İsteğe bağlı bağlam
   const username = sessionData?.username;
   const gender = sessionData?.gender;
   const therapistName = sessionData?.therapist?.name || "N/A";
-  const therapyTypeName = sessionData?.therapist?.therapyTypeName || sessionData?.therapist?.therapyType || "N/A";
   const clientLang = sessionData?.messages?.[0]?.language || "tr";
 
-  // Faz bazlı direktifler
-  const PHASE_TEXT = {
-    warmup: `
-Goal: kısa ısınma ve güven; duyguyu yansıt.
-Do: 1–2 kısa açık uçlu soru; doğrulayıcı, sıcak ton.
-Don’t: çözüm/ödev/kapanışa gitme.
-End: tek kısa check-in sorusu.
 
-ABSOLUTE BAN: kapanış/veda/gelecek seans iması YOK ("kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim").
-`,
-
-    mapping: `
-Goal: durumu haritala (olay–düşünce–duygu–beden–davranış).
-Do: 1 somut örnek iste; 1–2 soru ile ilişkileri netleştir.
-Don’t: teşhis/etiket, kapanış dili.
-End: tek kısa check-in sorusu.
-
-ABSOLUTE BAN: kapanış/veda/gelecek seans iması YOK ("kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim").
-`,
-
-    intervention: `
-Goal: hedefe yönelik küçük bir müdahale (Sokratik sorgulama / yeniden çerçeveleme / maruz bırakmaya hazırlık vb.).
-Do: tek bir mikro adım; örnek cümlelerle yönlendir.
-Don’t: uzun plan/ödev, kapanış dili.
-End: tek kısa check-in sorusu.
-
-ABSOLUTE BAN: kapanış/veda/gelecek seans iması YOK ("kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim").
-`,
-
-    skill: `
-Goal: şimdi birlikte mikro-beceri uygulat (örn. 4-7 nefes, 5-4-3-2-1 grounding).
-Do: adım adım yönlendir; yavaş, sakin tempo; 30–60 sn.
-Don’t: kapanış dili, uzun teori.
-End: tek kısa check-in sorusu ("bunu deneyelim mi?").
-
-Forbid (kesinlikle kullanma):
-- "kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim".
-- Gelecek seans/ödev/kapanış iması veya vedalaşma.
-
-ABSOLUTE BAN: kapanış/veda/gelecek seans iması YOK ("kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim").
-`,
-
-    relapse_plan: `
-Goal: tetikleyici/erken uyarı ve “if–then” mini plan.
-Do: 24 saat içinde uygulanacak 1 çok küçük adım; olası engel+ karşı hamle.
-Don’t: kapanış dili.
-End: tek kısa check-in sorusu.
-
-ABSOLUTE BAN: kapanış/veda/gelecek seans iması YOK ("kendine iyi bak", "gelecek seansımızda", "bugünlük bu kadar", "kapatmadan önce", "görüşmeyi burada bitirelim").
-`,
-
-    closing: `
-Goal: 1–2 cümle mini özet + bir sonraki küçük adımı teyit + nazik kapanış.
-Do: çabayı takdir et, net bir sonraki adım belirt.
-End: nazik, kısa kapanış cümlesi serbest.
-`,
-  };
-
-  // Kapanış dışındaki fazlarda kapanış yasağını netleştir
-  const noCloseNote = phase === "closing"
-    ? ""
-    : "Hard ban: kapanış/kapatma ima eden dil kullanma (örn. “bugünlük bu kadar”, “kapatmadan önce…”, “görüşmeyi burada bitirelim”).";
-
-  // Ana sistem metni
-  let text = `[DEVELOPER] — Session Orchestrator
-  phase=${phase}
-  elapsed_min=${+elapsedMin.toFixed(2)}
-  remaining_min=${+remainingMin.toFixed(2)}
-  rules=${JSON.stringify(rules)}
-
-  You are a therapy assistant. Respond in the client's language (default ${clientLang}). Spoken, concise tone; avoid lists unless necessary.
-  Context: therapist=${therapistName}, therapy_type=${therapyTypeName}.
-
-  ${noCloseNote}
-  PHASE DIRECTIVES:
-  ${PHASE_TEXT[phase] || PHASE_TEXT.intervention}
-  `;
-
-
-  text = 
+  let text = 
     `[DEVELOPER] — Infinite Coaching Orchestrator v3.5
 (Profile-Intake Mandatory, Natural Turn-End, Voice-Only)
 
@@ -730,12 +623,10 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
         s.price,
         t.name AS "therapistName",
         t.gender AS "therapistGender",
-        t.therapy_type_id AS "therapyTypeId",
-        tt.name AS "therapyTypeName"
+        t.voice_id AS "voiceId",
       FROM session s
       LEFT JOIN client c ON c.id = s.client_id
       LEFT JOIN therapist t   ON t.id  = s.therapist_id
-      LEFT JOIN therapy_type tt ON tt.id = t.therapy_type_id
       WHERE s.id = $1
       LIMIT 1
     `, [sessionId]);
@@ -771,8 +662,7 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
         id: meta.therapistId,
         name: meta.therapistName,
         gender: meta.therapistGender,
-        therapyTypeId: meta.therapyTypeId,
-        therapyTypeName: meta.therapyTypeName
+        voiceId: meta.voiceId
       },
       messages: msgRows // [{ id, created, language, isClient, content }, ...]
     };
@@ -845,7 +735,7 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     timer = Date.now()
 
     // 5) TTS: ElevenLabs -> ses
-    const ttsResp = await fetch(`${ELEVEN_TTS_URL}/${encodeURIComponent(ELEVEN_VOICE_ID)}`, {
+    const ttsResp = await fetch(`${ELEVEN_TTS_URL}/${encodeURIComponent(sessionData.therapist.voiceId)}`, {
       method: "POST",
       headers: {
         "xi-api-key": process.env.ELEVEN_API_KEY,
@@ -928,10 +818,7 @@ app.get("/therapists", async (req, res) => {
       params.push(q.trim());
       where.push(`(t.name ILIKE '%' || $${params.length} || '%' OR t.description ILIKE '%' || $${params.length} || '%')`);
     }
-    if (therapyTypeId) {
-      params.push(therapyTypeId);
-      where.push(`t.therapy_type_id = $${params.length}`);
-    }
+    
     if (gender !== undefined) {
       const g = parseInt(gender, 10);
       if ([0,1,2].includes(g)) {
@@ -945,11 +832,8 @@ app.get("/therapists", async (req, res) => {
         t.id,
         t.name,
         t.description,
-        t.gender,
-        t.therapy_type_id AS "therapyTypeId",
-        tt.name           AS "therapyTypeName"
+        t.gender
       FROM therapist t
-      LEFT JOIN therapy_type tt ON tt.id = t.therapy_type_id
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY t.name ASC
       LIMIT $${params.length + 1}
@@ -1001,12 +885,9 @@ app.get("/clients/:clientId/sessions", async (req, res) => {
         s.therapist_id           AS "therapistId",
         t.name                    AS "therapistName",
         t.gender                  AS "therapistGender",
-        t.therapy_type_id         AS "therapyTypeId",
-        tt.name                   AS "therapyTypeName",
         COUNT(*) OVER()           AS "total"
       FROM session s
       LEFT JOIN therapist t   ON t.id  = s.therapist_id
-      LEFT JOIN therapy_type tt ON tt.id = t.therapy_type_id
       WHERE ${where.join(' AND ')}
       ORDER BY s.created ${order}
       LIMIT $2 OFFSET $3
@@ -1025,9 +906,7 @@ app.get("/clients/:clientId/sessions", async (req, res) => {
         price: r.price,
         therapistId: r.therapistId,
         therapistName: r.therapistName,
-        therapistGender: r.therapistGender,
-        therapyTypeId: r.therapyTypeId,
-        therapyTypeName: r.therapyTypeName
+        therapistGender: r.therapistGender
       })),
       paging: { limit, offset, total }
     });
