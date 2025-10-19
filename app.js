@@ -122,35 +122,281 @@ app.post("/clients", async (req, res) => {
 });
 
 app.post("/sessions", async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { clientId, therapistId, price } = req.body;
+    const { clientId, therapistId } = req.body;
 
     if (!clientId || !therapistId) {
       return res.status(400).json({ error: "clientId ve therapistId zorunlu" });
     }
 
-    const query = `
-      INSERT INTO session (client_id, therapist_id, price)
-      VALUES ($1, $2, $3)
-      RETURNING id, created
+    // 1) ÖDEME KONTROLÜ: son 31 gün içinde completed ödeme var mı?
+    const payQ = `
+      SELECT 1
+      FROM public.client_payment
+      WHERE client_id = $1
+        AND status = 1                 -- 1: completed
+        AND paid_at >= NOW() - INTERVAL '31 days'
+      LIMIT 1
     `;
+    const payOk = await client.query(payQ, [clientId]);
+    if (payOk.rowCount === 0) {
+      return res.status(402).json({
+        error: "payment_required",
+        message:
+          "Aboneliğin aktif görünmüyor. Lütfen devam etmek için ödeme yap veya aboneliğini yenile."
+      });
+    }
 
-    const values = [clientId, therapistId, price || null];
-    const { rows } = await pool.query(query, values);
+    // 2) ANA OTURUM & SIRA NUMARASI
+    //    Transaction içinde yapalım ki numara güvenli olsun.
+    await client.query("BEGIN");
 
-    res.status(201).json({
+    // Ana oturumu al/oluştur
+    const msQ = `SELECT public.get_or_create_main_session($1) AS main_session_id`;
+    const { rows: msRows } = await client.query(msQ, [clientId]);
+    const mainSessionId = msRows[0]?.main_session_id;
+    if (!mainSessionId) throw new Error("main_session_not_found");
+
+    // Sıradaki seans numarası
+    const numQ = `SELECT public.next_session_number($1) AS next_no`;
+    const { rows: noRows } = await client.query(numQ, [mainSessionId]);
+    let sessionNumber = noRows[0]?.next_no || 1;
+
+    // 3) SEANSI OLUŞTUR
+    //    UNIQUE (main_session_id, number) nedeniyle çok nadir yarış olursa 1 kez daha deneyeceğiz.
+    const insertSession = async (number) => {
+      const insQ = `
+        INSERT INTO public."session"(client_id, therapist_id, main_session_id, "number")
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, created, "number", main_session_id
+      `;
+      return client.query(insQ, [clientId, therapistId, mainSessionId, number]);
+    };
+
+    let rows;
+    try {
+      ({ rows } = await insertSession(sessionNumber));
+    } catch (e) {
+      // eşzamanlı başka insert ile çakıştıysa (unique violation) bir üst numarayı dene
+      const isUnique =
+        (e.code === "23505") || // unique_violation
+        /duplicate key value violates unique constraint/i.test(String(e?.message || ""));
+      if (!isUnique) throw e;
+
+      // yeni numarayı tekrar hesapla ve bir kez daha dene
+      const { rows: noRows2 } = await client.query(numQ, [mainSessionId]);
+      sessionNumber = noRows2[0]?.next_no || (sessionNumber + 1);
+      ({ rows } = await insertSession(sessionNumber));
+    }
+
+    await client.query("COMMIT");
+
+    return res.status(201).json({
       id: rows[0].id,
       created: rows[0].created,
+      number: rows[0].number,
+      mainSessionId: rows[0].main_session_id
     });
   } catch (err) {
+    try { await client.query("ROLLBACK"); } catch {}
     console.error("createSession error:", err);
-    res.status(500).json({ error: "internal_error" });
+    return res.status(500).json({ error: "internal_error" });
+  } finally {
+    client.release();
   }
 });
 
-//*****
-// the algorithm
-//
+// Seansı bitir + OpenAI ile özet üret (danışan odaklı metin)
+app.post(
+  "/sessions/:sessionId/end",
+  /*
+    #swagger.tags = ['Sessions']
+    #swagger.summary = 'Seansı bitirir ve OpenAI ile seans özeti üretir'
+    #swagger.parameters['sessionId'] = { in: 'path', required: true, type: 'string', format: 'uuid' }
+    #swagger.parameters['force'] = { in: 'query', required: false, type: 'integer', enum: [0,1], default: 0, description: '1 ise ended/summary yeniden yazılabilir' }
+    #swagger.responses[200] = { description: 'Seans sonlandırıldı ve özet üretildi' }
+    #swagger.responses[404] = { description: 'Seans bulunamadı' }
+  */
+  async (req, res) => {
+    const db = await pool.connect();
+    try {
+      const { sessionId } = req.params;
+      const force = String(req.query.force || "0") === "1";
+
+      // 0) Seans meta
+      const { rows: sessRows } = await db.query(
+        `
+        SELECT s.id, s.client_id AS "clientId", s.therapist_id AS "therapistId",
+               s.created, s.ended, s.main_session_id AS "mainSessionId", s.number AS "sessionNumber"
+        FROM session s
+        WHERE s.id = $1
+        LIMIT 1
+        `,
+        [sessionId]
+      );
+      if (sessRows.length === 0) return res.status(404).json({ error: "session_not_found" });
+
+      const sess = sessRows[0];
+      if (sess.ended && !force) {
+        return res.status(200).json({ id: sess.id, ended: sess.ended, message: "already_ended" });
+      }
+
+      // 1) Bu seanstaki mesajlar (kronolojik)
+      const { rows: msgRows } = await db.query(
+        `
+        SELECT created, language, is_client AS "isClient", content
+        FROM message
+        WHERE session_id = $1
+        ORDER BY created ASC
+        `,
+        [sessionId]
+      );
+
+      // 2) Dil sezgisi (son danışan mesajına bak; yoksa 'tr')
+      const lastClient = [...msgRows].reverse().find(m => m.isClient);
+      const language = (lastClient?.language || "tr").toLowerCase();
+
+      // 3) Aynı main_session içindeki ÖNCEKİ seans özetleri
+      const { rows: summaryRows } = await db.query(
+        `
+        SELECT "number", summary, created
+        FROM session
+        WHERE main_session_id = $1
+          AND "number" < $2
+          AND summary IS NOT NULL
+        ORDER BY "number" ASC
+        LIMIT 12
+        `,
+        [sess.mainSessionId, sess.sessionNumber]
+      );
+
+      const clamp = (s, n) => (!s ? "" : (s.length <= n ? s : (s.slice(0, n).trim() + "…")));
+      const pastSummariesBlock =
+        summaryRows.length === 0
+          ? "PAST_SESSIONS_SUMMARIES: none."
+          : [
+              "PAST_SESSIONS_SUMMARIES:",
+              ...summaryRows.map(r => `#${r.number} (${new Date(r.created).toISOString()}): ${clamp(r.summary, 600)}`)
+            ].join("\n");
+
+      // 4) Bu seansın konuşma metni (token korumalı kaba kesim)
+      const convoLines = msgRows.map(m => `${m.isClient ? "User" : "Assistant"}: ${m.content}`);
+      let convo = ""; // ~12k char'a kadar sondan al, başa ekle
+      for (let i = convoLines.length - 1, used = 0; i >= 0; i--) {
+        const line = convoLines[i] + "\n";
+        if (used + line.length > 12000) break;
+        convo = line + convo;
+        used += line.length;
+      }
+
+      // 5) OpenAI özet prompt'u (danışan + koçun devamı için faydalı)
+      const sys = `
+You are a careful, concise **session summarizer** for a coaching app.
+Output MUST be in ${language}.
+No diagnosis/medical advice. Keep it supportive, concrete, and privacy-conscious.
+Use short, readable sentences. Produce clean Markdown sections.
+If no homework was assigned, write "Yok" under the homework section.
+`;
+
+      const startedAt = new Date(sess.created);
+      const endedAt = new Date(); // şimdi bitiriyoruz
+      const durationMin = Math.max(1, Math.round((endedAt - startedAt) / 60000));
+
+      const userPrompt = `
+${pastSummariesBlock}
+
+CURRENT_SESSION_META:
+- session_number: ${sess.sessionNumber}
+- started_at_iso: ${startedAt.toISOString()}
+
+CURRENT_SESSION_TRANSCRIPT (chronological, role-tagged):
+${convo}
+
+TASK:
+Create a clear, helpful **Markdown** summary in ${language} with these sections:
+
+# Seans Özeti
+- 5–10 kısa madde: ana temalar, duygular, tetikleyiciler, bağlam (iş/aile/zaman).
+- Bugün denenen teknikler ve kısa etkileri.
+- Alınan kararlar, mini içgörüler, pratik engeller (varsa).
+
+# Ödev (varsa)
+- Numaralı liste. Her madde şu alanları içersin: **Ne?** (tek net eylem), **Ne zaman?** (ör. akşam, gün boyu 2 kez), **Süre?** (ör. 2 dk), **Başarı ölçütü?** (ör. başlatabildim/başlatamadım).
+- Mümkünse kolaylaştırıcı bir alternatif ekle (örn. “olmazsa 5-4-3-2-1 grounding”).
+- Ödev yoksa "Yok" yaz.
+
+# Devam Planı (Koç Notu)
+- 2–5 kısa madde; bir sonraki görüşmede sürdürülebilirlik için ipuçları.
+- Etiket tarzı kısa alanlar:
+  * FOCUS: (örn. regulation / defusion / reframing / values / activation / problem / compassion / mi / sfbf)
+  * TOOLS_USED: (ör. 4-6 nefes, 5-4-3-2-1 grounding)
+  * TRIGGERS: (kısa, varsa)
+  * CONTRA: (tıbbi/ortam kısıtları; kısa)
+- Tarafsız kal; klinik etiketler kullanma.
+
+# Zaman Damgaları
+- Başlangıç: ${startedAt.toISOString()}
+- Bitiş: ${endedAt.toISOString()}
+- Süre (dakika): ${durationMin}
+`;
+
+      const payload = {
+        model: OPENAI_MODEL,
+        temperature: 0.2,
+        top_p: 0.9,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: userPrompt }
+        ]
+      };
+
+      const aiResp = await fetch(OPENAI_API_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!aiResp.ok) {
+        const txt = await aiResp.text().catch(() => "");
+        throw new Error(`OpenAI summary failed: ${aiResp.status} ${txt}`);
+      }
+      const aiJson = await aiResp.json();
+      const summaryText = aiJson.choices?.[0]?.message?.content?.trim() || "";
+      if (!summaryText) throw new Error("Empty OpenAI summary");
+
+      // 6) DB: seansı bitir ve özeti yaz
+      await db.query("BEGIN");
+      const { rows: upd } = await db.query(
+        `
+        UPDATE session
+        SET ended = $2,
+            summary = $3
+        WHERE id = $1
+        RETURNING id, ended
+        `,
+        [sessionId, endedAt.toISOString(), summaryText]
+      );
+      await db.query("COMMIT");
+
+      return res.status(200).json({
+        id: upd[0].id,
+        ended: upd[0].ended,
+        summary_preview: summaryText.slice(0, 240) + (summaryText.length > 240 ? "…" : "")
+      });
+    } catch (err) {
+      try { await db.query("ROLLBACK"); } catch {}
+      console.error("end session error:", err);
+      return res.status(500).json({ error: "internal_error", detail: String(err.message || err) });
+    } finally {
+      db.release();
+    }
+  }
+);
+
 
 /** ====== System Prompt (kısaltılmış, voice-only, güvenlik dahil) ====== */
 function buildSystemPrompt() {
@@ -247,8 +493,8 @@ function buildDeveloperMessage(sessionData) {
 
 
   let text = 
-    `[DEVELOPER] — Infinite Coaching Orchestrator v3.5
-(Profile-Intake Mandatory, Natural Turn-End, Voice-Only)
+    `[DEVELOPER] — Infinite Coaching Orchestrator v3.6
+(Profile-Intake Mandatory, Natural Turn-End, Voice-Only, Past-Summary Aware)
 
 phase=coach_continuous
 rules={
@@ -281,6 +527,19 @@ language=${clientLang}
 time_constraints={{PROFILE.time_constraints||null}}
 
 #####################################
+# CONTEXT INPUTS (system'den gelebilir)
+#####################################
+- PAST_SESSIONS_SUMMARIES: Aynı main session'a ait önceki seansların kısa özetleri.
+  Örn. format:
+  PAST_SESSIONS_SUMMARIES:
+  #3 (2025-09-10T18:05:00Z): ...
+  #4 (2025-09-17T18:05:00Z): ...
+- Kullanım ilkesi:
+  * Varsa, son özet(ler)deki plan/taahhüt/mini-ödev ile TUTARLILIK önceliklidir.
+  * Aynı şeyleri yeniden sorma; önceki planı 1 satır “devam bağlamı” olarak an.
+  * Çelişki görürsen nazikçe güncelleme iste (max 1 kısa soru) veya küçük bir alternatif öner.
+
+#####################################
 # INTAKE LOGIC (mandatory, short coaching)
 #####################################
 - Amaç: Kısa koçluk görüşmesinde temel bilgileri erken tamamlamak.
@@ -291,12 +550,11 @@ time_constraints={{PROFILE.time_constraints||null}}
   4) marital_status / children_count
   5) medical_conditions (kronik rahatsızlık, gebelik, sakatlık vb.)
   6) height_cm / weight_kg (yalnızca hedefle doğrudan ilişkiliyse veya kullanıcı açarsa)
-
-- İlk 2–3 tur içinde yukarıdaki tüm alanlar sorulmalı.  
-- Her turda en fazla 1–2 kısa soru sor.  
-- Kullanıcı paylaşmak istemezse saygıyla kabul et; PROFILE_UPDATE alanına “declined” olarak yaz (örn. age=declined).  
-- Sohbet geçmişinde veya PROFILE_STATUS’ta varsa yeniden sorma.  
-- Kullanıcı doğrudan bir problem anlatsa bile, eksik intake alanları tamamlanana kadar en az 1 intake sorusu ekle.  
+- İlk 2–3 tur içinde yukarıdaki tüm alanlar sorulmalı.
+- Her turda en fazla 1–2 kısa soru sor.
+- Kullanıcı paylaşmak istemezse saygıyla kabul et; PROFILE_UPDATE alanına “declined” olarak yaz (örn. age=declined).
+- Sohbet geçmişinde veya PROFILE_STATUS’ta varsa yeniden sorma.
+- Kullanıcı doğrudan bir problem anlatsa bile, eksik intake alanları tamamlanana kadar en az 1 intake sorusu ekle.
 
 #####################################
 # CONTRAINDICATIONS (safety filters)
@@ -311,20 +569,22 @@ time_constraints={{PROFILE.time_constraints||null}}
 #####################################
 # COACHING LOOP (her tur, kısa)
 #####################################
-1) Yansıt: Kullanıcının söylediklerini 1 cümlede özetle/normalize et.  
-2) Intake gerekiyorsa: eksik alanları kapatmak için 1 kısa soru ekle.  
-3) Tek bir mikro-beceri uygulat (30–60 sn; güvenli varyant).  
+1) Yansıt + Devam Bağlamı:
+   - Kullanıcının söylediklerini 1 cümlede özetle/normalize et.
+   - PAST_SESSIONS_SUMMARIES varsa, en son seanstaki planı 1 kısa cümleyle hatırlat (“geçen defa 2 dakikalık başlatmayı seçmiştik”).
+2) Intake gerekiyorsa: eksik alanları kapatmak için 1 kısa soru ekle.
+3) Tek bir mikro-beceri uygulat (30–60 sn; güvenli varyant).
 4) Ölçüm (0–10) yalnızca kritik anlarda:
-   • Seans başında (genel duygu skoru)  
-   • Bir beceri uygulamasının hemen sonrasında (öncesi/sonrası)  
+   • Seans başında (genel duygu skoru)
+   • Bir beceri uygulamasının hemen sonrasında (öncesi/sonrası)
    • Seans sonunda (kapanış)
-   Aralarda her turda ölçüm sorma.  
-5) **TURN-END STYLE**: 
-   • **ASK** → yalnızca bilgi eksiği varsa tek kısa soru (arka arkaya yok).  
-   • **INVITE** → nazik davet.  
-   • **AFFIRM** → destek + yön.  
-   • **PAUSE** → sessiz destek.  
-   Varsayılan: INVITE veya AFFIRM.  
+   Aralarda her turda ölçüm sorma.
+5) **TURN-END STYLE**:
+   • **ASK** → yalnızca bilgi eksiği varsa tek kısa soru (arka arkaya yok).
+   • **INVITE** → nazik davet.
+   • **AFFIRM** → destek + yön.
+   • **PAUSE** → sessiz destek.
+   Varsayılan: INVITE veya AFFIRM.
 
 #####################################
 # GUARDS
@@ -338,6 +598,8 @@ time_constraints={{PROFILE.time_constraints||null}}
   * Kullanıcıdan yazılı yanıt, metin veya form bekleme.
   * Asla “şunu bana yaz” ya da “cevabını buraya yaz” deme.
   * Tüm ödevler sözel, hatırlatıcı veya davranışsal nitelikte olmalı.
+- PAST_SESSIONS_SUMMARIES varsa: önceki plan/ödevle çelişen yönlendirme verme; güncelleme gerekiyorsa kısa ve açık şekilde teyit et.
+- Intake konuları önceki özetlerde netleşmişse yeniden sorma; yalnızca değişiklik/kısa teyit gerekirse tek soru sor.
 
 #####################################
 # OUTPUT SHAPE (strict)
@@ -373,8 +635,9 @@ ASK: yalnızca TURN_END=ask ise tek kısa açık soru; diğer hallerde boş bır
   return text;
 }
 
-app.post("/sessions/:sessionId/messages/audio", upload.single("audio"), 
-  /* 
+// Mesaj (audio) → STT → AI → (DB'ye kaydet) → TTS → response
+app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
+  /*
     #swagger.tags = ['Messages']
     #swagger.summary = 'Audio → STT → AI → TTS'
     #swagger.consumes = ['multipart/form-data']
@@ -394,247 +657,302 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     }
   */
   async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { sessionId } = req.params;
-    const { language = "tr" } = req.body;
-    const streamAudio = String(req.query.stream || "0") === "1"; // ?stream=1 ise ses stream
+    const client = await pool.connect();
+    try {
+      const { sessionId } = req.params;
+      const { language = "tr" } = req.body;
+      const streamAudio = String(req.query.stream || "0") === "1";
 
-    if (!req.file) {
-      return res.status(400).json({ error: "audio file missing (field name: audio)" });
-    }
+      if (!req.file) {
+        return res
+          .status(400)
+          .json({ error: "audio file missing (field name: audio)" });
+      }
 
-    var timer = Date.now();
+      let timer = Date.now();
 
-    const sttResp = await fetch(ELEVEN_STT_URL, {
-      method: "POST",
-      headers: { "xi-api-key": process.env.ELEVEN_API_KEY },
-      body: (() => {
-        const fd = new FormData();
-        // Dosya (ogg/wav/mp3) — mimetype'ı da verin
-        fd.append(
-          "file",
-          new Blob([req.file.buffer], { type: req.file.mimetype || "audio/ogg" }),
-          req.file.originalname || "audio.ogg"
-        );
-
-        // ZORUNLU: model_id (STT için Scribe v1)
-        fd.append("model_id", "scribe_v1");
-
-        // Opsiyonel ama doğru anahtar adı: language_code
-        if (language) fd.append("language_code", language);
-
-        fd.append("diarize", "false");                  // konuşmacı ayrımı kapalı
-        fd.append("num_speakers", "1");                 // tek konuşmacı varsay
-        fd.append("timestamps_granularity", "none");    // timestamp üretme
-        fd.append("tag_audio_events", "false");         // (laughter) gibi eventleri etiketleme
-        return fd;
-      })(),
-    });
-
-    if (!sttResp.ok) {
-      const txt = await sttResp.text().catch(() => "");
-      throw new Error(`ElevenLabs STT failed: ${sttResp.status} ${txt}`);
-    }
-    const sttJson = await sttResp.json();
-    const userText = sttJson.text || sttJson.transcript || ""; // alan adı dokümana göre değişebilir
-    if (!userText) throw new Error("Empty transcript from STT");
-
-    console.log('s2t: ' + (Date.now() - timer))
-    timer = Date.now()
-
-    // 2) DB: kullanıcının mesajını kaydet (transaction)
-    await client.query("BEGIN");
-    const insertUser = `
-      INSERT INTO message (session_id, created, language, is_client, content)
-      VALUES ($1, NOW(), $2, TRUE, $3)
-      RETURNING id, created
-    `;
-    const { rows: userRows } = await client.query(insertUser, [sessionId, language, userText]);
-    const userMessageId = userRows[0].id;
-
-    console.log('insert user msg to db: ' + (Date.now() - timer))
-    timer = Date.now()
-
-    //db'den session'ı al
-    // ... try bloğunun içinde bir yerde (STT'den önce veya sonra kullanabilirsin):
-    // 0) Session meta + terapist + terapi tipi
-    const { rows: metaRows } = await client.query(`
-      SELECT
-        s.id,
-        c.username,
-        c.gender,
-        s.client_id AS "clientId",
-        s.therapist_id AS "therapistId",
-        s.created,
-        s.ended,
-        s.price,
-        t.name AS "therapistName",
-        t.gender AS "therapistGender",
-        t.voice_id AS "voiceId"
-      FROM session s
-      LEFT JOIN client c ON c.id = s.client_id
-      LEFT JOIN therapist t   ON t.id  = s.therapist_id
-      WHERE s.id = $1
-      LIMIT 1
-    `, [sessionId]);
-
-    if (metaRows.length === 0) {
-      return res.status(404).json({ error: "session_not_found" });
-    }
-    const meta = metaRows[0];
-
-    // 1) Mesajları kronolojik sırayla çek (en eski -> en yeni)
-    const { rows: msgRows } = await client.query(`
-      SELECT
-        id,
-        created,
-        language,
-        is_client AS "isClient",
-        content
-      FROM message
-      WHERE session_id = $1
-      ORDER BY created ASC
-    `, [sessionId]);
-
-    // 2) İstediğin tek JS objesi
-    const sessionData = {
-      id: meta.id,
-      created: meta.created, // seans başlangıç zamanı
-      ended: meta.ended,
-      price: meta.price,
-      username: meta.username,
-      gender: meta.gender == 1 ? "male" : (meta.gender == 2 ? "female" : "don't want to disclose"),
-      clientId: meta.clientId,
-      therapist: {
-        id: meta.therapistId,
-        name: meta.therapistName,
-        gender: meta.therapistGender,
-        voiceId: meta.voiceId
-      },
-      messages: msgRows // [{ id, created, language, isClient, content }, ...]
-    };
-
-    // (Opsiyonel) OpenAI'a geçmiş + yeni mesajla gideceksen:
-    const chatHistory = sessionData.messages.map(m => ({
-      role: m.isClient ? "user" : "assistant",
-      content: m.content
-    }));
-    // sonra chatHistory'yi prompt'a dahil edebilirsin.
-
-    console.log('get session from db: ' + (Date.now() - timer))
-    timer = Date.now()
-
-    // 3) OpenAI: yanıt al
-    const MAX_MESSAGES = 30; // son 30 mesajı al (gerektiğinde arttır/azalt)
-    const historyTail = chatHistory.slice(-MAX_MESSAGES); // [{role, content}, ...]
-
-    // (İsteğe bağlı) çok uzunluk kontrolü basitçe karaktere göre:
-    let totalChars = 0;
-    const trimmed = [];
-    for (let i = historyTail.length - 1; i >= 0; i--) {
-      totalChars += (historyTail[i].content || "").length;
-      if (totalChars > 8000) break;
-      trimmed.unshift(historyTail[i]); // başa ekle
-    }
-
-    const payload = {
-      model: OPENAI_MODEL,
-      temperature: 0.2,
-      top_p: 0.8, // ↓ düşük ihtimalleri kırpar -> hız
-      messages: [
-        { role: "system", content: buildSystemPrompt() },
-        { role: "system", content: buildDeveloperMessage(sessionData) },
-        ...trimmed
-      ]
-    };
-
-    const aiResp = await fetch(OPENAI_API_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!aiResp.ok) {
-      const txt = await aiResp.text().catch(() => "");
-      throw new Error(`OpenAI failed: ${aiResp.status} ${txt}`);
-    }
-    const aiJson = await aiResp.json();
-    const aiText = aiJson.choices?.[0]?.message?.content?.trim() || "";
-    if (!aiText) throw new Error("Empty AI response");
-
-    console.log('open ai response: ' + (Date.now() - timer))
-    timer = Date.now()
-
-    // 4) DB: AI mesajını kaydet
-    const insertAi = `
-      INSERT INTO message (session_id, created, language, is_client, content)
-      VALUES ($1, NOW(), $2, FALSE, $3)
-      RETURNING id, created
-    `;
-    const { rows: aiRows } = await client.query(insertAi, [sessionId, language, aiText]);
-    const aiMessageId = aiRows[0].id;
-    await client.query("COMMIT");
-
-    console.log('insert assistant msg to db: ' + (Date.now() - timer))
-    timer = Date.now()
-
-    // 5) TTS: ElevenLabs -> ses
-    const ttsResp = await fetch(`${ELEVEN_TTS_URL}/${encodeURIComponent(sessionData.therapist.voiceId)}`, {
-      method: "POST",
-      headers: {
-        "xi-api-key": process.env.ELEVEN_API_KEY,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        text: aiText,
-        voice_settings: { stability: 0.5, similarity_boost: 0.75 }, // isteğe göre
-        //model_id: "eleven_multilingual_v2" // dokümanınıza göre
-        model_id: "eleven_flash_v2_5",          // ↓ hız odaklı model
-        output_format: "mp3_22050_32"          // ↓ küçük dosya
-      })
-    });
-    if (!ttsResp.ok) {
-      const txt = await ttsResp.text().catch(() => "");
-      throw new Error(`ElevenLabs TTS failed: ${ttsResp.status} ${txt}`);
-    }
-    const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
-
-    console.log('t2s: ' + (Date.now() - timer))
-    timer = Date.now()
-
-    // 6) Yanıt: İsteğe göre stream ya da base64
-    if (streamAudio) {
-      res.setHeader("Content-Type", "audio/mpeg"); // ElevenLabs genelde mp3 verir
-      res.setHeader("Content-Disposition", `inline; filename="reply.mp3"`);
-      return res.send(audioBuffer);
-    } else {
-      const b64 = audioBuffer.toString("base64");
-
-      console.log('audio buffer: ' + (Date.now() - timer))
-      timer = Date.now()
-
-      return res.status(201).json({
-        sessionId,
-        userMessageId,
-        aiMessageId,
-        transcript: userText,
-        aiText,
-        audioBase64: b64,
-        audioMime: "audio/mpeg"
+      // ============== 1) STT ==============
+      const sttResp = await fetch(ELEVEN_STT_URL, {
+        method: "POST",
+        headers: { "xi-api-key": process.env.ELEVEN_API_KEY },
+        body: (() => {
+          const fd = new FormData();
+          fd.append(
+            "file",
+            new Blob([req.file.buffer], { type: req.file.mimetype || "audio/ogg" }),
+            req.file.originalname || "audio.ogg"
+          );
+          fd.append("model_id", "scribe_v1");
+          if (language) fd.append("language_code", language);
+          fd.append("diarize", "false");
+          fd.append("num_speakers", "1");
+          fd.append("timestamps_granularity", "none");
+          fd.append("tag_audio_events", "false");
+          return fd;
+        })(),
       });
+
+      if (!sttResp.ok) {
+        const txt = await sttResp.text().catch(() => "");
+        throw new Error(`ElevenLabs STT failed: ${sttResp.status} ${txt}`);
+      }
+      const sttJson = await sttResp.json();
+      const userText = sttJson.text || sttJson.transcript || "";
+      if (!userText) throw new Error("Empty transcript from STT");
+
+      console.log("s2t: " + (Date.now() - timer));
+      timer = Date.now();
+
+      // ============== 2) DB: Kullanıcı mesajını yaz (BEGIN) ==============
+      await client.query("BEGIN");
+      const insertUser = `
+        INSERT INTO message (session_id, created, language, is_client, content)
+        VALUES ($1, NOW(), $2, TRUE, $3)
+        RETURNING id, created
+      `;
+      const { rows: userRows } = await client.query(insertUser, [
+        sessionId,
+        language,
+        userText,
+      ]);
+      const userMessageId = userRows[0].id;
+
+      console.log("insert user msg to db: " + (Date.now() - timer));
+      timer = Date.now();
+
+      // ============== 3) DB: Seans meta + terapist + bu seansın tüm mesajları ==============
+      // (price kaldırıldı)
+      const { rows: metaRows } = await client.query(
+        `
+        SELECT
+          s.id,
+          s.main_session_id AS "mainSessionId",
+          s.number         AS "sessionNumber",
+          c.username,
+          c.gender,
+          s.client_id      AS "clientId",
+          s.therapist_id   AS "therapistId",
+          s.created,
+          s.ended,
+          t.name           AS "therapistName",
+          t.gender         AS "therapistGender",
+          t.voice_id       AS "voiceId"
+        FROM session s
+        LEFT JOIN client    c ON c.id = s.client_id
+        LEFT JOIN therapist t ON t.id  = s.therapist_id
+        WHERE s.id = $1
+        LIMIT 1
+        `,
+        [sessionId]
+      );
+
+      if (metaRows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "session_not_found" });
+      }
+      const meta = metaRows[0];
+
+      // Bu seanstaki mesajlar (kronolojik)
+      const { rows: msgRows } = await client.query(
+        `
+        SELECT
+          id,
+          created,
+          language,
+          is_client AS "isClient",
+          content
+        FROM message
+        WHERE session_id = $1
+        ORDER BY created ASC
+        `,
+        [sessionId]
+      );
+
+      const sessionData = {
+        id: meta.id,
+        mainSessionId: meta.mainSessionId,
+        sessionNumber: meta.sessionNumber,
+        created: meta.created,
+        ended: meta.ended,
+        username: meta.username,
+        gender:
+          meta.gender == 1
+            ? "male"
+            : meta.gender == 2
+            ? "female"
+            : "don't want to disclose",
+        clientId: meta.clientId,
+        therapist: {
+          id: meta.therapistId,
+          name: meta.therapistName,
+          gender: meta.therapistGender,
+          voiceId: meta.voiceId,
+        },
+        messages: msgRows,
+      };
+
+      // ============== 4) PAST SUMMARIES: Aynı main_session’daki önceki seans özetleri ==============
+      const { rows: summaryRows } = await client.query(
+        `
+        SELECT "number", summary, created
+        FROM session
+        WHERE main_session_id = $1
+          AND "number" < $2
+          AND summary IS NOT NULL
+        ORDER BY "number" ASC
+        LIMIT 12
+        `,
+        [sessionData.mainSessionId, sessionData.sessionNumber]
+      );
+
+      const clamp = (s, n) =>
+        !s ? "" : s.length <= n ? s : s.slice(0, n).trim() + "…";
+
+      const pastSummariesBlock =
+        summaryRows.length === 0
+          ? "PAST_SESSIONS: none."
+          : [
+              "PAST_SESSIONS_SUMMARIES:",
+              ...summaryRows.map(
+                (r) =>
+                  `#${r.number} (${new Date(r.created).toISOString()}): ${clamp(
+                    r.summary,
+                    600
+                  )}`
+              ),
+            ].join("\n");
+
+      // ============== 5) OpenAI: Chat geçmişi + geçmiş özetlerle yanıt ==============
+      const chatHistory = sessionData.messages.map((m) => ({
+        role: m.isClient ? "user" : "assistant",
+        content: m.content,
+      }));
+
+      const MAX_MESSAGES = 30;
+      const historyTail = chatHistory.slice(-MAX_MESSAGES);
+
+      // Basit token koruması
+      let totalChars = 0;
+      const trimmed = [];
+      for (let i = historyTail.length - 1; i >= 0; i--) {
+        totalChars += (historyTail[i].content || "").length;
+        if (totalChars > 8000) break;
+        trimmed.unshift(historyTail[i]);
+      }
+
+      const sysMsg = buildSystemPrompt({ language }); // dil parametresiyle
+      const devMsg = buildDeveloperMessage(sessionData);
+
+      const payload = {
+        model: OPENAI_MODEL,
+        temperature: 0.2,
+        top_p: 0.8,
+        messages: [
+          { role: "system", content: sysMsg },
+          { role: "system", content: devMsg },
+          { role: "system", content: pastSummariesBlock }, // geçmiş seans özetleri
+          ...trimmed,
+        ],
+      };
+
+      const aiResp = await fetch(OPENAI_API_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!aiResp.ok) {
+        const txt = await aiResp.text().catch(() => "");
+        throw new Error(`OpenAI failed: ${aiResp.status} ${txt}`);
+      }
+      const aiJson = await aiResp.json();
+      const aiText = aiJson.choices?.[0]?.message?.content?.trim() || "";
+      if (!aiText) throw new Error("Empty AI response");
+
+      console.log("open ai response: " + (Date.now() - timer));
+      timer = Date.now();
+
+      // ============== 6) DB: AI mesajını kaydet ==============
+      const insertAi = `
+        INSERT INTO message (session_id, created, language, is_client, content)
+        VALUES ($1, NOW(), $2, FALSE, $3)
+        RETURNING id, created
+      `;
+      const { rows: aiRows } = await client.query(insertAi, [
+        sessionId,
+        language,
+        aiText,
+      ]);
+      const aiMessageId = aiRows[0].id;
+
+      await client.query("COMMIT");
+
+      console.log("insert assistant msg to db: " + (Date.now() - timer));
+      timer = Date.now();
+
+      // ============== 7) TTS ==============
+      const ttsResp = await fetch(
+        `${ELEVEN_TTS_URL}/${encodeURIComponent(sessionData.therapist.voiceId)}`,
+        {
+          method: "POST",
+          headers: {
+            "xi-api-key": process.env.ELEVEN_API_KEY,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: aiText,
+            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+            model_id: "eleven_flash_v2_5",
+            output_format: "mp3_22050_32",
+          }),
+        }
+      );
+      if (!ttsResp.ok) {
+        const txt = await ttsResp.text().catch(() => "");
+        throw new Error(`ElevenLabs TTS failed: ${ttsResp.status} ${txt}`);
+      }
+      const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
+
+      console.log("t2s: " + (Date.now() - timer));
+      timer = Date.now();
+
+      // ============== 8) Response ==============
+      if (streamAudio) {
+        res.setHeader("Content-Type", "audio/mpeg");
+        res.setHeader("Content-Disposition", `inline; filename="reply.mp3"`);
+        return res.send(audioBuffer);
+      } else {
+        const b64 = audioBuffer.toString("base64");
+        console.log("audio buffer: " + (Date.now() - timer));
+        timer = Date.now();
+
+        return res.status(201).json({
+          sessionId,
+          userMessageId,
+          aiMessageId,
+          transcript: userText,
+          aiText,
+          audioBase64: b64,
+          audioMime: "audio/mpeg",
+        });
+      }
+    } catch (err) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {}
+      console.error("audio message flow error:", err);
+      return res
+        .status(500)
+        .json({ error: "internal_error", detail: String(err.message || err) });
+    } finally {
+      client.release();
     }
-  } catch (err) {
-    try { await client.query("ROLLBACK"); } catch {}
-    console.error("audio message flow error:", err);
-    res.status(500).json({ error: "internal_error", detail: String(err.message || err) });
-  } finally {
-    client.release();
   }
-});
+);
+
 
 // GET /therapists  — liste + filtre + sayfalama
 app.get("/therapists", async (req, res) => {
@@ -696,6 +1014,107 @@ app.get("/therapists", async (req, res) => {
     res.status(500).json({ error: "internal_error" });
   }
 });
+
+// Seans özeti getir (Markdown ya da opsiyonel HTML)
+app.get("/sessions/:sessionId/summary",
+  /*
+    #swagger.tags = ['Sessions']
+    #swagger.summary = 'Seans özeti (Markdown) döner; ?format=html ile HTML dönebilir'
+    #swagger.parameters['sessionId'] = { in: 'path', required: true, type: 'string', format: 'uuid' }
+    #swagger.parameters['format']    = { in: 'query', required: false, type: 'string', enum: ['md', 'markdown', 'html'], default: 'md' }
+    #swagger.responses[200] = { description: 'Özet bulundu' }
+    #swagger.responses[404] = { description: 'Seans veya özet bulunamadı' }
+  */
+  async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const fmt = String(req.query.format || "md").toLowerCase();
+
+      const { rows } = await pool.query(
+        `
+        SELECT
+          s.id,
+          s.main_session_id AS "mainSessionId",
+          s.number          AS "sessionNumber",
+          s.created,
+          s.ended,
+          s.summary
+        FROM session s
+        WHERE s.id = $1
+        LIMIT 1
+        `,
+        [sessionId]
+      );
+
+      if (rows.length === 0) {
+        return res.status(404).json({ error: "session_not_found" });
+      }
+
+      const s = rows[0];
+
+      if (!s.summary) {
+        // Özet henüz üretilmemişse
+        return res.status(404).json({ error: "summary_not_found" });
+      }
+
+      // Basit ETag (değişirse front-end yeniden çeker)
+      const etag = `"s_${s.id}_${Buffer.from(s.summary).toString("base64").slice(0, 16)}"`;
+      if (req.headers["if-none-match"] === etag) {
+        return res.status(304).end();
+      }
+      res.setHeader("ETag", etag);
+      res.setHeader("Cache-Control", "private, max-age=60"); // 60 sn
+
+      // İsteğe bağlı: HTML formatı (çok basit markdown->html; paket kullanmadan)
+      if (fmt === "html") {
+        const md = s.summary;
+
+        // Çok basit ve güvenli bir dönüştürme (temel başlık/kalın/liste)
+        const escapeHtml = (str) =>
+          str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        const toHtml = (markdown) => {
+          // başlıklar
+          let html = escapeHtml(markdown)
+            .replace(/^### (.*)$/gmi, "<h3>$1</h3>")
+            .replace(/^## (.*)$/gmi, "<h2>$1</h2>")
+            .replace(/^# (.*)$/gmi, "<h1>$1</h1>")
+            // kalın/italik
+            .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+            .replace(/\*(.*?)\*/g, "<em>$1</em>")
+            // sıralı liste
+            .replace(/^\s*\d+\.\s+(.*)$/gmi, "<li>$1</li>")
+            // madde işaretli liste
+            .replace(/^\s*-\s+(.*)$/gmi, "<li>$1</li>")
+            // satır sonları
+            .replace(/\n{2,}/g, "</p><p>")
+            .replace(/\n/g, "<br/>");
+
+          // <li>’leri <ul>/<ol> sarmalamak için çok basit toparlama
+          // (kolaylık için tüm <li>’leri <ul> içine alıyoruz)
+          html = html.replace(/(<li>.*<\/li>)/gms, "<ul>$1</ul>");
+          return `<article>${html}</article>`;
+        };
+
+        const html = toHtml(md);
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        return res.status(200).send(html);
+      }
+
+      // Varsayılan: JSON + Markdown
+      return res.status(200).json({
+        id: s.id,
+        mainSessionId: s.mainsessionid,  // not: pg camelcase → lower dönüşebilir, aşağıda düzeltelim
+        sessionNumber: s.sessionnumber,
+        created: s.created,
+        ended: s.ended,
+        summary_markdown: s.summary
+      });
+    } catch (err) {
+      console.error("get session summary error:", err);
+      return res.status(500).json({ error: "internal_error" });
+    }
+  }
+);
 
 // GET /clients/:clientId/sessions  — seans listesi (terapist + terapi tipi adı ile)
 app.get("/clients/:clientId/sessions", async (req, res) => {
@@ -760,6 +1179,142 @@ app.get("/clients/:clientId/sessions", async (req, res) => {
     res.status(500).json({ error: "internal_error" });
   }
 });
+
+// Ödeme kaydet (idempotent: (provider, transaction_id) unique)
+app.post(
+  "/payments",
+  /*
+    #swagger.tags = ['Payments']
+    #swagger.summary = 'Ödeme kaydeder (idempotent).'
+    #swagger.requestBody = {
+      required: true,
+      content: {
+        "application/json": {
+          schema: {
+            type: "object",
+            required: ["clientId", "provider", "transactionId", "amount", "currency"],
+            properties: {
+              clientId: { type: "string", format: "uuid" },
+              sessionId: { type: "string", format: "uuid" },
+              provider: { oneOf: [{type:"string", enum:["ios","android","web"]}, {type:"integer", enum:[1,2,3]}] },
+              status: { oneOf: [{type:"string", enum:["pending","completed","refunded","revoked"]}, {type:"integer", enum:[0,1,2,3]}], default: "completed" },
+              transactionId: { type: "string" },
+              amount: { type: "number", minimum: 0 },
+              currency: { type: "string", minLength: 3, maxLength: 3, example: "TRY" },
+              paidAt: { type: "string", format: "date-time" },
+              note: { type: "string" },
+              rawPayload: { type: "object" }
+            }
+          }
+        }
+      }
+    }
+  */
+  async (req, res) => {
+    const db = await pool.connect();
+    try {
+      const {
+        clientId,
+        sessionId = null,
+        provider,
+        status = "completed",
+        transactionId,
+        amount,
+        currency,
+        paidAt = null,
+        note = null,
+        rawPayload = null
+      } = req.body || {};
+
+      // ---- validations (hafif) ----
+      if (!clientId || !transactionId || amount == null || !currency || !provider) {
+        return res.status(400).json({ error: "bad_request", message: "clientId, provider, transactionId, amount, currency zorunlu" });
+      }
+      if (typeof amount !== "number" || !(amount >= 0)) {
+        return res.status(400).json({ error: "bad_request", message: "amount >= 0 olmalı" });
+      }
+      if (String(currency).length !== 3) {
+        return res.status(400).json({ error: "bad_request", message: "currency 3 harfli olmalı (örn. TRY, USD)" });
+      }
+
+      // provider map
+      const provMap = { ios: 1, android: 2, web: 3 };
+      const provVal = Number.isInteger(provider) ? provider : provMap[String(provider).toLowerCase()];
+      if (![1, 2, 3].includes(provVal)) {
+        return res.status(400).json({ error: "bad_request", message: "provider ios|android|web (veya 1|2|3) olmalı" });
+      }
+
+      // status map
+      const stMap = { pending: 0, completed: 1, refunded: 2, revoked: 3 };
+      const stVal = Number.isInteger(status) ? status : stMap[String(status).toLowerCase()];
+      if (![0, 1, 2, 3].includes(stVal)) {
+        return res.status(400).json({ error: "bad_request", message: "status pending|completed|refunded|revoked (veya 0|1|2|3) olmalı" });
+      }
+
+      // paid_at
+      const paidAtTs = paidAt ? new Date(paidAt) : null;
+      if (paidAt && isNaN(paidAtTs.getTime())) {
+        return res.status(400).json({ error: "bad_request", message: "paidAt geçerli bir ISO tarih olmalı" });
+      }
+
+      // ---- insert (idempotent) ----
+      // UNIQUE (provider, transaction_id) olduğu için duplicate'te mevcut kaydı döndürüyoruz.
+      const insertQ = `
+        INSERT INTO public.client_payment
+          (client_id, session_id, provider, transaction_id, amount, currency, status, paid_at, raw_payload, note)
+        VALUES
+          ($1,        $2,        $3,       $4,            $5,     $6,       $7,     COALESCE($8, NOW()),  $9,         $10)
+        ON CONFLICT (provider, transaction_id) DO UPDATE
+          SET client_id = EXCLUDED.client_id,
+              session_id = COALESCE(EXCLUDED.session_id, client_payment.session_id),
+              amount = EXCLUDED.amount,
+              currency = EXCLUDED.currency,
+              status = EXCLUDED.status,
+              paid_at = LEAST(client_payment.paid_at, EXCLUDED.paid_at), -- ilk tarih korunur
+              raw_payload = COALESCE(EXCLUDED.raw_payload, client_payment.raw_payload),
+              note = COALESCE(EXCLUDED.note, client_payment.note)
+        RETURNING id, client_id AS "clientId", session_id AS "sessionId",
+                  provider, transaction_id AS "transactionId", amount, currency,
+                  status, paid_at AS "paidAt", created, note;
+      `;
+
+      const values = [
+        clientId,
+        sessionId,
+        provVal,
+        transactionId,
+        amount,
+        String(currency).toUpperCase(),
+        stVal,
+        paidAtTs ? paidAtTs.toISOString() : null,
+        rawPayload ? JSON.stringify(rawPayload) : null,
+        note
+      ];
+
+      const { rows } = await db.query(insertQ, values);
+      const row = rows[0];
+
+      return res.status(201).json({
+        id: row.id,
+        clientId: row.clientId,
+        sessionId: row.sessionId,
+        provider: row.provider, // 1|2|3
+        transactionId: row.transactionId,
+        amount: row.amount,
+        currency: row.currency,
+        status: row.status,     // 0|1|2|3
+        paidAt: row.paidAt,
+        created: row.created,
+        note: row.note
+      });
+    } catch (err) {
+      console.error("create payment error:", err);
+      return res.status(500).json({ error: "internal_error" });
+    } finally {
+      db.release();
+    }
+  }
+);
 
 // Swagger setup
 app.use(

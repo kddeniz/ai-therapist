@@ -151,9 +151,6 @@
                 },
                 "therapistId": {
                   "example": "any"
-                },
-                "price": {
-                  "example": "any"
                 }
               }
             }
@@ -168,6 +165,63 @@
           },
           "400": {
             "description": "Bad Request"
+          },
+          "402": {
+            "description": "Payment Required"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/sessions/{sessionId}/end": {
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Seansı bitirir ve OpenAI ile seans özeti üretir",
+        "description": "",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "enum": [
+              0,
+              1
+            ],
+            "default": 0,
+            "description": "1 ise ended/summary yeniden yazılabilir"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Seans sonlandırıldı ve özet üretildi"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "404": {
+            "description": "Seans bulunamadı"
           },
           "500": {
             "description": "Internal Server Error"
@@ -333,6 +387,65 @@
         }
       }
     },
+    "/sessions/{sessionId}/summary": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Seans özeti (Markdown) döner; ?format=html ile HTML dönebilir",
+        "description": "",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "md",
+              "markdown",
+              "html"
+            ],
+            "default": "md"
+          },
+          {
+            "name": "if-none-match",
+            "in": "header",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Özet bulundu"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "304": {
+            "description": "Not Modified"
+          },
+          "404": {
+            "description": "Seans veya özet bulunamadı"
+          }
+        }
+      }
+    },
     "/clients/{clientId}/sessions": {
       "get": {
         "tags": [
@@ -400,6 +513,134 @@
           },
           "500": {
             "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/payments": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Ödeme kaydeder (idempotent).",
+        "description": "",
+        "parameters": [
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "clientId",
+                  "provider",
+                  "transactionId",
+                  "amount",
+                  "currency"
+                ],
+                "properties": {
+                  "clientId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "sessionId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "provider": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "ios",
+                          "android",
+                          "web"
+                        ]
+                      },
+                      {
+                        "type": "integer",
+                        "enum": [
+                          1,
+                          2,
+                          3
+                        ]
+                      }
+                    ]
+                  },
+                  "status": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "pending",
+                          "completed",
+                          "refunded",
+                          "revoked"
+                        ]
+                      },
+                      {
+                        "type": "integer",
+                        "enum": [
+                          0,
+                          1,
+                          2,
+                          3
+                        ]
+                      }
+                    ],
+                    "default": "completed"
+                  },
+                  "transactionId": {
+                    "type": "string"
+                  },
+                  "amount": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "currency": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 3,
+                    "example": "TRY"
+                  },
+                  "paidAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "note": {
+                    "type": "string"
+                  },
+                  "rawPayload": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
           }
         }
       }
