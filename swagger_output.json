@@ -175,64 +175,6 @@
         }
       }
     },
-    "/sessions/{sessionId}/messages": {
-      "post": {
-        "description": "",
-        "parameters": [
-          {
-            "name": "sessionId",
-            "in": "path",
-            "required": true,
-            "type": "string"
-          },
-          {
-            "name": "origin",
-            "in": "header",
-            "type": "string"
-          },
-          {
-            "name": "access-control-request-headers",
-            "in": "header",
-            "type": "string"
-          },
-          {
-            "name": "body",
-            "in": "body",
-            "schema": {
-              "type": "object",
-              "properties": {
-                "text": {
-                  "example": "any"
-                },
-                "language": {
-                  "example": "any"
-                }
-              }
-            }
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": "Created"
-          },
-          "204": {
-            "description": "No Content"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          },
-          "502": {
-            "description": "Bad Gateway"
-          }
-        }
-      }
-    },
     "/sessions/{sessionId}/messages/audio": {
       "post": {
         "tags": [
@@ -343,17 +285,15 @@
             "type": "string"
           },
           {
+            "name": "therapyTypeId",
+            "in": "query",
+            "type": "string"
+          },
+          {
             "name": "q",
             "in": "query",
             "type": "string",
             "description": "İsim/açıklama arama (ILIKE)"
-          },
-          {
-            "name": "therapyTypeId",
-            "in": "query",
-            "type": "string",
-            "format": "uuid",
-            "description": "Terapi tipi filtresi"
           },
           {
             "name": "gender",

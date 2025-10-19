@@ -148,158 +148,6 @@ app.post("/sessions", async (req, res) => {
   }
 });
 
-app.post("/sessions/:sessionId/messages", async (req, res) => {
-  const { sessionId } = req.params;
-  const { text, language = "tr" } = req.body || {};
-
-  if (!text || !text.trim()) {
-    return res.status(400).json({ error: "text is required" });
-  }
-
-  try {
-    // 0) Session var mı?
-    const s = await pool.query("SELECT 1 FROM session WHERE id = $1", [sessionId]);
-    if (s.rowCount === 0) {
-      return res.status(404).json({ error: "session_not_found" });
-    }
-
-    // 1) Kullanıcı mesajını kaydet
-    const insertUser = `
-      INSERT INTO message (session_id, created, language, is_client, content)
-      VALUES ($1, NOW(), $2, TRUE, $3)
-      RETURNING id, created
-    `;
-    const { rows: userRows } = await pool.query(insertUser, [sessionId, language, text.trim()]);
-    const userMessageId = userRows[0].id;
-
-    // ... try bloğunun içinde bir yerde (STT'den önce veya sonra kullanabilirsin):
-    // 0) Session meta + terapist + terapi tipi
-    const { rows: metaRows } = await pool.query(`
-      SELECT
-        s.id,
-        s.client_id AS "clientId",
-        s.therapist_id AS "therapistId",
-        s.created,
-        s.ended,
-        s.price,
-        t.name AS "therapistName",
-        t.gender AS "therapistGender",
-        t.voice_id as "voiceId"
-      FROM session s
-      LEFT JOIN therapist t   ON t.id  = s.therapist_id
-      WHERE s.id = $1
-      LIMIT 1
-    `, [sessionId]);
-
-    if (metaRows.length === 0) {
-      return res.status(404).json({ error: "session_not_found" });
-    }
-    const meta = metaRows[0];
-
-    // 1) Mesajları kronolojik sırayla çek (en eski -> en yeni)
-    const { rows: msgRows } = await pool.query(`
-      SELECT
-        id,
-        created,
-        language,
-        is_client AS "isClient",
-        content
-      FROM message
-      WHERE session_id = $1
-      ORDER BY created ASC
-    `, [sessionId]);
-
-    // 2) İstediğin tek JS objesi
-    const sessionData = {
-      id: meta.id,
-      created: meta.created, // seans başlangıç zamanı
-      ended: meta.ended,
-      price: meta.price,
-      clientId: meta.clientId,
-      therapist: {
-        id: meta.therapistId,
-        name: meta.therapistName,
-        gender: meta.therapistGender,
-        voiceId: meta.voiceId
-      },
-      messages: msgRows // [{ id, created, language, isClient, content }, ...]
-    };
-
-    // (Opsiyonel) OpenAI'a geçmiş + yeni mesajla gideceksen:
-    const chatHistory = sessionData.messages.map(m => ({
-      role: m.isClient ? "user" : "assistant",
-      content: m.content
-    }));
-    // sonra chatHistory'yi prompt'a dahil edebilirsin.
-
-    
-    // 2) OpenAI’dan yanıt al
-    const MAX_MESSAGES = 30; // son 30 mesajı al (gerektiğinde arttır/azalt)
-    const historyTail = chatHistory.slice(-MAX_MESSAGES); // [{role, content}, ...]
-
-    // (İsteğe bağlı) çok uzunluk kontrolü basitçe karaktere göre:
-    let totalChars = 0;
-    const trimmed = [];
-    for (let i = historyTail.length - 1; i >= 0; i--) {
-      totalChars += (historyTail[i].content || "").length;
-      if (totalChars > 8000) break;
-      trimmed.unshift(historyTail[i]); // başa ekle
-    }
-
-    const payload = {
-      model: OPENAI_MODEL,
-      temperature: 0.3,
-      messages: [
-        { role: "system", content: buildSystemPrompt() },
-        { role: "system", content: buildDeveloperMessage(sessionData) },
-        ...trimmed
-      ]
-    };
-
-    const aiResp = await fetch(OPENAI_API_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!aiResp.ok) {
-      const body = await aiResp.text().catch(() => "");
-      // Kullanıcı mesajı DB’de duruyor; 502 ile döndürüp id’yi veriyoruz.
-      return res.status(502).json({ error: "openai_failed", userMessageId, detail: body });
-    }
-
-    const aiJson = await aiResp.json();
-    const aiText = aiJson.choices?.[0]?.message?.content?.trim() || "";
-    if (!aiText) {
-      return res.status(502).json({ error: "empty_ai_response", userMessageId });
-    }
-
-    // 3) AI mesajını kaydet
-    const insertAi = `
-      INSERT INTO message (session_id, created, language, is_client, content)
-      VALUES ($1, NOW(), $2, FALSE, $3)
-      RETURNING id, created
-    `;
-    const { rows: aiRows } = await pool.query(insertAi, [sessionId, language, aiText]);
-    const aiMessageId = aiRows[0].id;
-
-    // 4) Yanıt
-    return res.status(201).json({
-      sessionId,
-      userMessageId,
-      aiMessageId,
-      userText: text.trim(),
-      aiText
-    });
-  } catch (err) {
-    console.error("text message flow error:", err);
-    return res.status(500).json({ error: "internal_error" });
-  }
-});
-
 //*****
 // the algorithm
 //
@@ -880,7 +728,6 @@ app.get("/clients/:clientId/sessions", async (req, res) => {
         s.id,
         s.created,
         s.ended,
-        s.price,
         s.therapist_id           AS "therapistId",
         t.name                    AS "therapistName",
         t.gender                  AS "therapistGender",
@@ -902,7 +749,6 @@ app.get("/clients/:clientId/sessions", async (req, res) => {
         id: r.id,
         created: r.created,
         ended: r.ended,
-        price: r.price,
         therapistId: r.therapistId,
         therapistName: r.therapistName,
         therapistGender: r.therapistGender
