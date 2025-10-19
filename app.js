@@ -384,7 +384,7 @@ Create a clear, helpful **Markdown** summary in ${language} with these sections:
       return res.status(200).json({
         id: upd[0].id,
         ended: upd[0].ended,
-        summary_preview: summaryText.slice(0, 240) + (summaryText.length > 240 ? "…" : "")
+        summary_preview: summaryText.slice(0, 1000) + (summaryText.length > 1000 ? "…" : "")
       });
     } catch (err) {
       try { await db.query("ROLLBACK"); } catch {}
