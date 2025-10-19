@@ -392,7 +392,7 @@
         "tags": [
           "Sessions"
         ],
-        "summary": "Seans özeti (Markdown) döner; ?format=html ile HTML dönebilir",
+        "summary": "Seans özeti (PUBLIC). ?coach=1 ile koç notlarını da ekler; ?format=html ile HTML döner",
         "description": "",
         "parameters": [
           {
@@ -425,8 +425,25 @@
             "default": "md"
           },
           {
+            "name": "coach",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "enum": [
+              0,
+              1
+            ],
+            "default": 0,
+            "description": "1 ise COACH bloğunu da döner"
+          },
+          {
             "name": "if-none-match",
             "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "include",
+            "in": "query",
             "type": "string"
           }
         ],

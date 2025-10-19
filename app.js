@@ -291,11 +291,24 @@ app.post("/sessions/:sessionId/end",
 
       // 5) OpenAI özet prompt'u (danışan + koçun devamı için faydalı)
       const sys = `
-You are a careful, concise **session summarizer** for a coaching app.
+You are a careful, concise session summarizer for a coaching app.
 Output MUST be in ${language}.
-No diagnosis/medical advice. Keep it supportive, concrete, and privacy-conscious.
-Use short, readable sentences. Produce clean Markdown sections.
-If no homework was assigned, write "Yok" under the homework section.
+No diagnosis or medical advice. Be supportive, concrete, privacy-conscious.
+You MUST produce TWO clearly delimited sections with exact markers:
+
+===PUBLIC_BEGIN===
+... (content for the client to read)
+===PUBLIC_END===
+
+===COACH_BEGIN===
+... (coach-only notes, short, machine-parsable)
+===COACH_END===
+
+Anything between PUBLIC markers is safe to show the client.
+Anything between COACH markers is for internal continuity only.
+Do NOT duplicate coach-only content in the public section.
+Use short sentences and clean Markdown in PUBLIC; bullet points are okay.
+If no homework exists, write "Yok" under homework.
 `;
 
       const startedAt = new Date(sess.created);
@@ -313,31 +326,34 @@ CURRENT_SESSION_TRANSCRIPT (chronological, role-tagged):
 ${convo}
 
 TASK:
-Create a clear, helpful **Markdown** summary in ${language} with these sections:
+Produce TWO sections with the exact markers below.
 
+===PUBLIC_BEGIN===
 # Seans Özeti
 - 5–10 kısa madde: ana temalar, duygular, tetikleyiciler, bağlam (iş/aile/zaman).
 - Bugün denenen teknikler ve kısa etkileri.
 - Alınan kararlar, mini içgörüler, pratik engeller (varsa).
 
 # Ödev (varsa)
-- Numaralı liste. Her madde şu alanları içersin: **Ne?** (tek net eylem), **Ne zaman?** (ör. akşam, gün boyu 2 kez), **Süre?** (ör. 2 dk), **Başarı ölçütü?** (ör. başlatabildim/başlatamadım).
+- Numaralı liste. Her madde şu alanları içersin:
+  **Ne?** (tek net eylem) — **Ne zaman?** (örn. akşam, günde 2 kez) —
+  **Süre?** (örn. 2 dk) — **Başarı ölçütü?** (örn. başlatabildim/başlatamadım).
 - Mümkünse kolaylaştırıcı bir alternatif ekle (örn. “olmazsa 5-4-3-2-1 grounding”).
 - Ödev yoksa "Yok" yaz.
+===PUBLIC_END===
 
-# Devam Planı (Koç Notu)
+===COACH_BEGIN===
+Devam Planı (Koç Notu)
 - 2–5 kısa madde; bir sonraki görüşmede sürdürülebilirlik için ipuçları.
-- Etiket tarzı kısa alanlar:
-  * FOCUS: (örn. regulation / defusion / reframing / values / activation / problem / compassion / mi / sfbf)
-  * TOOLS_USED: (ör. 4-6 nefes, 5-4-3-2-1 grounding)
-  * TRIGGERS: (kısa, varsa)
-  * CONTRA: (tıbbi/ortam kısıtları; kısa)
-- Tarafsız kal; klinik etiketler kullanma.
-
-# Zaman Damgaları
-- Başlangıç: ${startedAt.toISOString()}
-- Bitiş: ${endedAt.toISOString()}
-- Süre (dakika): ${durationMin}
+- Etiketler (varsa, tek satırda, kısa):
+  FOCUS: {regulation|defusion|reframing|values|activation|problem|compassion|mi|sfbf|mindfulness}
+  TOOLS_USED: (örn. 4-6 nefes; 5-4-3-2-1 grounding)
+  TRIGGERS: (kısa, varsa)
+  CONTRA: (tıbbi/ortam kısıtları; kısa)
+Notes:
+- Keep this block coach-only; do NOT reveal internal phrasing or meta instructions in PUBLIC.
+- Use neutral, non-clinical language.
+===COACH_END===
 `;
 
       const payload = {
@@ -384,7 +400,7 @@ Create a clear, helpful **Markdown** summary in ${language} with these sections:
       return res.status(200).json({
         id: upd[0].id,
         ended: upd[0].ended,
-        summary_preview: summaryText.slice(0, 1000) + (summaryText.length > 1000 ? "…" : "")
+        summary_preview: summaryText.slice(0, 2000) + (summaryText.length > 2000 ? "…" : "")
       });
     } catch (err) {
       try { await db.query("ROLLBACK"); } catch {}
@@ -1016,9 +1032,10 @@ app.get("/therapists", async (req, res) => {
 app.get("/sessions/:sessionId/summary",
   /*
     #swagger.tags = ['Sessions']
-    #swagger.summary = 'Seans özeti (Markdown) döner; ?format=html ile HTML dönebilir'
+    #swagger.summary = 'Seans özeti (PUBLIC). ?coach=1 ile koç notlarını da ekler; ?format=html ile HTML döner'
     #swagger.parameters['sessionId'] = { in: 'path', required: true, type: 'string', format: 'uuid' }
-    #swagger.parameters['format']    = { in: 'query', required: false, type: 'string', enum: ['md', 'markdown', 'html'], default: 'md' }
+    #swagger.parameters['format']    = { in: 'query', required: false, type: 'string', enum: ['md','markdown','html'], default: 'md' }
+    #swagger.parameters['coach']     = { in: 'query', required: false, type: 'integer', enum: [0,1], default: 0, description: '1 ise COACH bloğunu da döner' }
     #swagger.responses[200] = { description: 'Özet bulundu' }
     #swagger.responses[404] = { description: 'Seans veya özet bulunamadı' }
   */
@@ -1026,7 +1043,11 @@ app.get("/sessions/:sessionId/summary",
     try {
       const { sessionId } = req.params;
       const fmt = String(req.query.format || "md").toLowerCase();
+      const includeCoach =
+        String(req.query.coach || "0") === "1" ||
+        String(req.query.include || "").toLowerCase() === "coach=1";
 
+      // -- DB: özet çek
       const { rows } = await pool.query(
         `
         SELECT
@@ -1042,69 +1063,81 @@ app.get("/sessions/:sessionId/summary",
         `,
         [sessionId]
       );
-
-      if (rows.length === 0) {
-        return res.status(404).json({ error: "session_not_found" });
-      }
+      if (rows.length === 0) return res.status(404).json({ error: "session_not_found" });
 
       const s = rows[0];
+      if (!s.summary) return res.status(404).json({ error: "summary_not_found" });
 
-      if (!s.summary) {
-        // Özet henüz üretilmemişse
-        return res.status(404).json({ error: "summary_not_found" });
+      // -- Ayraçlı blokları çıkar (PUBLIC / COACH)
+      function extractBlocks(md) {
+        const get = (label) => {
+          const re = new RegExp(`===${label}_BEGIN===\\s*([\\s\\S]*?)\\s*===${label}_END===`, "i");
+          const m = md.match(re);
+          return m ? m[1].trim() : null;
+        };
+        return { public: get("PUBLIC"), coach: get("COACH") };
       }
 
-      // Basit ETag (değişirse front-end yeniden çeker)
-      const etag = `"s_${s.id}_${Buffer.from(s.summary).toString("base64").slice(0, 16)}"`;
+      const { public: publicMd, coach: coachMd } = extractBlocks(s.summary);
+
+      // Geriye dönük uyumluluk: ayraç yoksa tüm metni PUBLIC say
+      const effectivePublic = publicMd || s.summary;
+      const effectiveCoach = publicMd ? (includeCoach ? (coachMd || null) : null) : (includeCoach ? null : null);
+      // Not: Ayraç yoksa coachMd yok sayılır (gizli içerik yok)
+
+      // -- İçerik: döndürülecek MD metni (PUBLIC + opsiyonel COACH)
+      const combinedMd = includeCoach && coachMd
+        ? `${effectivePublic}\n\n---\n\n<!-- Coach Only -->\n\n${coachMd}`
+        : effectivePublic;
+
+      // -- ETag: dönen içerik üzerinden
+      const etag = `"sum_${s.id}_${Buffer.from(combinedMd).toString("base64").slice(0, 16)}"`;
       if (req.headers["if-none-match"] === etag) {
         return res.status(304).end();
       }
       res.setHeader("ETag", etag);
-      res.setHeader("Cache-Control", "private, max-age=60"); // 60 sn
+      res.setHeader("Cache-Control", "private, max-age=60");
 
-      // İsteğe bağlı: HTML formatı (çok basit markdown->html; paket kullanmadan)
-      if (fmt === "html") {
-        const md = s.summary;
+      // -- HTML gerekiyorsa basit bir dönüştürücü
+      if (fmt === "html" || fmt === "markdown+html") {
+        const md = combinedMd;
 
-        // Çok basit ve güvenli bir dönüştürme (temel başlık/kalın/liste)
         const escapeHtml = (str) =>
           str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
         const toHtml = (markdown) => {
-          // başlıklar
+          // çok basit bir markdown→html (paketsiz)
           let html = escapeHtml(markdown)
             .replace(/^### (.*)$/gmi, "<h3>$1</h3>")
             .replace(/^## (.*)$/gmi, "<h2>$1</h2>")
             .replace(/^# (.*)$/gmi, "<h1>$1</h1>")
-            // kalın/italik
             .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
             .replace(/\*(.*?)\*/g, "<em>$1</em>")
-            // sıralı liste
+            // listeler
             .replace(/^\s*\d+\.\s+(.*)$/gmi, "<li>$1</li>")
-            // madde işaretli liste
             .replace(/^\s*-\s+(.*)$/gmi, "<li>$1</li>")
-            // satır sonları
+            // paragraflar & satırlar
             .replace(/\n{2,}/g, "</p><p>")
             .replace(/\n/g, "<br/>");
 
-          // <li>’leri <ul>/<ol> sarmalamak için çok basit toparlama
-          // (kolaylık için tüm <li>’leri <ul> içine alıyoruz)
-          html = html.replace(/(<li>.*<\/li>)/gms, "<ul>$1</ul>");
-          return `<article>${html}</article>`;
+          // tüm <li>’leri <ul> içine al (basit yaklaşım)
+          html = html.replace(/(<li>[\s\S]*?<\/li>)/gms, "<ul>$1</ul>");
+          return `<article class="summary">${html}</article>`;
         };
 
-        const html = toHtml(md);
         res.setHeader("Content-Type", "text/html; charset=utf-8");
-        return res.status(200).send(html);
+        return res.status(200).send(toHtml(md));
       }
 
-      // Varsayılan: JSON + Markdown
+      // -- Varsayılan: JSON + Markdown (PUBLIC zorunlu, COACH opsiyonel)
       return res.status(200).json({
         id: s.id,
-        mainSessionId: s.mainsessionid,  // not: pg camelcase → lower dönüşebilir, aşağıda düzeltelim
-        sessionNumber: s.sessionnumber,
+        mainSessionId: s.mainSessionId,
+        sessionNumber: s.sessionNumber,
         created: s.created,
         ended: s.ended,
-        summary_markdown: s.summary
+        summary_markdown: effectivePublic,
+        coach_markdown: includeCoach ? coachMd || null : undefined
       });
     } catch (err) {
       console.error("get session summary error:", err);
