@@ -10,7 +10,7 @@ if (result.error) console.error("dotenv load error:", result.error);
 else console.log("dotenv loaded from:", envPath);
 
 const express = require("express");
-const { Pool } = require("pg");  
+const { Pool } = require("pg");
 const PORT = process.env.PORT || 3000;
 const { v4: uuidv4 } = require("uuid"); // uuid kütüphanesini ekleyin (npm install uuid)
 const app = express();
@@ -199,7 +199,7 @@ app.post("/sessions", async (req, res) => {
       mainSessionId: rows[0].main_session_id
     });
   } catch (err) {
-    try { await client.query("ROLLBACK"); } catch {}
+    try { await client.query("ROLLBACK"); } catch { }
     console.error("createSession error:", err);
     return res.status(500).json({ error: "internal_error" });
   } finally {
@@ -307,25 +307,31 @@ Yok
 
       // 4) OpenAI özet prompt'u (yalnızca BU seans — geçmiş özetler yok)
       const sys = `
-You are a careful, concise session summarizer for a coaching app.
+You are a careful, extractive session summarizer for a coaching app.
 Output MUST be in ${language}.
-No diagnosis or medical advice. Be supportive, concrete, privacy-conscious.
-You MUST produce TWO clearly delimited sections with exact markers:
 
+HARD CONSTRAINTS (DO NOT VIOLATE):
+- Use ONLY facts explicitly supported by CURRENT_SESSION_TRANSCRIPT below.
+- DO NOT invent, speculate, generalize, or infer unstated plans/goals/feelings/techniques.
+- If something is not clearly present in the transcript, omit it.
+- Homework must be listed ONLY if it was explicitly assigned in the transcript or the client explicitly committed to it; otherwise write "Yok".
+- If no relevant items exist for a section, write "Yok".
+- Keep private/coach-only notes strictly out of PUBLIC.
+
+FORMAT (two fenced sections with exact markers):
 ===PUBLIC_BEGIN===
-... (content for the client to read)
+... (client-visible Markdown)
 ===PUBLIC_END===
 
 ===COACH_BEGIN===
-... (coach-only notes, short, machine-parsable)
+... (coach-only, short, machine-parsable; also EXTRACTIVE ONLY)
 ===COACH_END===
 
-Anything between PUBLIC markers is safe to show the client.
-Anything between COACH markers is for internal continuity only.
-Do NOT duplicate coach-only content in the public section.
-Use short sentences and clean Markdown in PUBLIC; bullet points are okay.
-If no homework exists, write "Yok" under homework.
+STYLE:
+- Short, concrete bullet points; plain Markdown.
+- No diagnosis/medical advice.
 `;
+
 
       const userPrompt = `
 CURRENT_SESSION_META:
@@ -334,49 +340,47 @@ CURRENT_SESSION_META:
 - ended_at_iso: ${endedAt.toISOString()}
 - duration_min: ${durationMin}
 
-CURRENT_SESSION_TRANSCRIPT (chronological, role-tagged):
+CURRENT_SESSION_TRANSCRIPT (chronological, role-tagged; this is the ONLY source of truth):
 ${convo}
 
 TASK:
-Produce TWO sections with the exact markers below.
+Produce TWO sections with the exact markers below. Every bullet must be directly supported by the transcript text. 
+If a section would require guessing, write "Yok" for that section.
 
 ===PUBLIC_BEGIN===
 # Seans Özeti
-- 5–10 kısa madde: ana temalar, duygular, tetikleyiciler, bağlam (iş/aile/zaman).
-- Bugün denenen teknikler ve kısa etkileri.
-- Alınan kararlar, mini içgörüler, pratik engeller (varsa).
+- 3–8 kısa madde: sadece metinde geçen ana temalar/duygular/tetikleyiciler/kararlar/uygulanan teknikler.
+- Metinde GEÇMEYEN hiçbir teknik/öneri/yorum ekleme.
 
-# Ödev (varsa)
-- Numaralı liste. Her madde şu alanları içersin:
-  **Ne?** (tek net eylem) — **Ne zaman?** (örn. akşam, günde 2 kez) —
-  **Süre?** (örn. 2 dk) — **Başarı ölçütü?** (örn. başlatabildim/başlatamadım).
-- Mümkünse kolaylaştırıcı bir alternatif ekle (örn. “olmazsa 5-4-3-2-1 grounding”).
-- Ödev yoksa "Yok" yaz.
+# Ödev
+- Yalnızca metinde AÇIKÇA verilen ödev ya da danışanın açık taahhüdü varsa maddeler olarak yaz.
+- Her madde şu alanları (metinde varsa) içersin: **Ne?** / **Ne zaman?** / **Süre?** / **Başarı ölçütü?**
+- Aksi halde tek satır: "Yok"
 ===PUBLIC_END===
 
 ===COACH_BEGIN===
 Devam Planı (Koç Notu)
-- 2–5 kısa madde; bir sonraki görüşmede sürdürülebilirlik için ipuçları.
-- Etiketler (varsa, tek satırda, kısa):
-  FOCUS: {regulation|defusion|reframing|values|activation|problem|compassion|mi|sfbf|mindfulness}
-  TOOLS_USED: (örn. 4-6 nefes; 5-4-3-2-1 grounding)
-  TRIGGERS: (kısa, varsa)
-  CONTRA: (tıbbi/ortam kısıtları; kısa)
-Notes:
-- Keep this block coach-only; do NOT reveal internal phrasing or meta instructions in PUBLIC.
-- Use neutral, non-clinical language.
+- Sadece metinde geçen gelecek adımlar/odaklar/engeller varsa özetle; yoksa "Yok".
+- Etiketler (yalnızca metinden çıkarılabiliyorsa, tek satır): 
+  FOCUS: ...
+  TOOLS_USED: ...
+  TRIGGERS: ...
+  CONTRA: ...
+- Metinde yoksa bu alanları yazma.
 ===COACH_END===
 `;
 
+
       const payload = {
         model: OPENAI_MODEL,
-        temperature: 0.2,
-        top_p: 0.9,
+        temperature: 0,     // <-- yaratıcı değil, tutucu
+        top_p: 1,           // <-- sampling daraltma yok
         messages: [
           { role: "system", content: sys },
           { role: "user", content: userPrompt }
         ]
       };
+
 
       const aiResp = await fetch(OPENAI_API_URL, {
         method: "POST",
@@ -415,7 +419,7 @@ Notes:
         summary_preview: summaryText.slice(0, 2000) + (summaryText.length > 2000 ? "…" : "")
       });
     } catch (err) {
-      try { await db.query("ROLLBACK"); } catch {}
+      try { await db.query("ROLLBACK"); } catch { }
       console.error("end session error:", err);
       return res.status(500).json({ error: "internal_error", detail: String(err.message || err) });
     } finally {
@@ -518,7 +522,7 @@ function buildDeveloperMessage(sessionData) {
   const clientLang = sessionData?.messages?.[0]?.language || "tr";
 
 
-  let text = 
+  let text =
     `[DEVELOPER] — Infinite Coaching Orchestrator v3.6
 (Profile-Intake Mandatory, Natural Turn-End, Voice-Only, Past-Summary Aware)
 
@@ -805,8 +809,8 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
           meta.gender == 1
             ? "male"
             : meta.gender == 2
-            ? "female"
-            : "don't want to disclose",
+              ? "female"
+              : "don't want to disclose",
         clientId: meta.clientId,
         therapist: {
           id: meta.therapistId,
@@ -838,15 +842,15 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
         summaryRows.length === 0
           ? "PAST_SESSIONS: none."
           : [
-              "PAST_SESSIONS_SUMMARIES:",
-              ...summaryRows.map(
-                (r) =>
-                  `#${r.number} (${new Date(r.created).toISOString()}): ${clamp(
-                    r.summary,
-                    600
-                  )}`
-              ),
-            ].join("\n");
+            "PAST_SESSIONS_SUMMARIES:",
+            ...summaryRows.map(
+              (r) =>
+                `#${r.number} (${new Date(r.created).toISOString()}): ${clamp(
+                  r.summary,
+                  600
+                )}`
+            ),
+          ].join("\n");
 
       // ============== 5) OpenAI: Chat geçmişi + geçmiş özetlerle yanıt ==============
       const chatHistory = sessionData.messages.map((m) => ({
@@ -968,7 +972,7 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
     } catch (err) {
       try {
         await client.query("ROLLBACK");
-      } catch {}
+      } catch { }
       console.error("audio message flow error:", err);
       return res
         .status(500)
@@ -1002,16 +1006,16 @@ app.get("/therapists", async (req, res) => {
     const add = (clause, val) => { params.push(val); where.push(`${clause} $${params.length}`); };
 
     if (q && q.trim()) {
-      add("(t.name ILIKE '%' || $${i} || '%' OR t.description ILIKE '%' || $${i} || '%')".replaceAll("$${i}", `$${params.length+1}`), q.trim());
+      add("(t.name ILIKE '%' || $${i} || '%' OR t.description ILIKE '%' || $${i} || '%')".replaceAll("$${i}", `$${params.length + 1}`), q.trim());
       // yukarıdaki küçük numara: param indexini doğru artırmak için replace
       // ama istersen şöyle de yazabiliriz (daha okunur):
       params.push(q.trim());
       where.push(`(t.name ILIKE '%' || $${params.length} || '%' OR t.description ILIKE '%' || $${params.length} || '%')`);
     }
-    
+
     if (gender !== undefined) {
       const g = parseInt(gender, 10);
-      if ([0,1,2].includes(g)) {
+      if ([0, 1, 2].includes(g)) {
         params.push(g);
         where.push(`t.gender = $${params.length}`);
       }
@@ -1182,7 +1186,7 @@ app.get("/clients/:clientId/sessions", async (req, res) => {
     const params = [clientId];
 
     if (status === 'active') where.push('s.ended IS NULL');
-    if (status === 'ended')  where.push('s.ended IS NOT NULL');
+    if (status === 'ended') where.push('s.ended IS NOT NULL');
 
     const sql = `
       SELECT
