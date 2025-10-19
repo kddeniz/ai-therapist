@@ -1359,6 +1359,89 @@ app.post("/payments",
   }
 );
 
+//sil
+// Tüm ödemeleri (geçici) listele
+app.get("/payments",
+  /*
+    #swagger.tags = ['Payments']
+    #swagger.summary = 'Geçici: ödemeleri listeler (test amaçlı)'
+    #swagger.parameters['clientId'] = { in: 'query', required: false, type: 'string', format: 'uuid' }
+    #swagger.parameters['provider'] = { in: 'query', required: false, type: 'integer', enum: [1,2,3], description: '1=iOS, 2=Android, 3=Web' }
+    #swagger.parameters['status']   = { in: 'query', required: false, type: 'integer', enum: [0,1,2,3], description: '0=pending,1=completed,2=refunded,3=revoked' }
+    #swagger.parameters['limit']    = { in: 'query', required: false, type: 'integer', default: 100, description: 'Max 200' }
+    #swagger.parameters['offset']   = { in: 'query', required: false, type: 'integer', default: 0 }
+    #swagger.responses[200] = { description: 'OK' }
+  */
+  async (req, res) => {
+    try {
+      const {
+        clientId = null,
+        provider = null, // 1=iOS,2=Android,3=Web
+        status   = null, // 0=pending,1=completed,2=refunded,3=revoked
+      } = req.query;
+
+      let limit  = parseInt(req.query.limit ?? "100", 10);
+      let offset = parseInt(req.query.offset ?? "0", 10);
+      if (!Number.isFinite(limit)  || limit  <= 0) limit = 100;
+      if (!Number.isFinite(offset) || offset < 0)  offset = 0;
+      if (limit > 200) limit = 200;
+
+      const where = [];
+      const params = [];
+      const add = (cond, val) => { params.push(val); where.push(cond.replace(/\$\?/g, `$${params.length}`)); };
+
+      if (clientId) add(`p.client_id = $?::uuid`, clientId);
+      if (provider !== null && provider !== undefined && `${provider}` !== "") add(`p.provider = $?::int`, Number(provider));
+      if (status   !== null   && status   !== undefined   && `${status}`   !== "") add(`p.status   = $?::int`, Number(status));
+
+      const sql = `
+        SELECT
+          p.id,
+          p.client_id      AS "clientId",
+          c.username       AS "clientUsername",
+          p.session_id     AS "sessionId",
+          p.provider,
+          p.transaction_id AS "transactionId",
+          p.amount,
+          p.currency,
+          p.status,
+          p.paid_at        AS "paidAt",
+          p.created,
+          p.note
+        FROM public.client_payment p
+        LEFT JOIN public.client c ON c.id = p.client_id
+        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+        ORDER BY p.paid_at DESC NULLS LAST, p.created DESC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+      `;
+
+      params.push(limit, offset);
+
+      const { rows } = await pool.query(sql, params);
+
+      // İsteğe bağlı: provider/status’ı insan okunur metne çevir (ham değerleri de koruyorum)
+      const provMap = { 1: 'ios', 2: 'android', 3: 'web' };
+      const statMap = { 0: 'pending', 1: 'completed', 2: 'refunded', 3: 'revoked' };
+
+      const data = rows.map(r => ({
+        ...r,
+        providerLabel: provMap[r.provider] ?? null,
+        statusLabel:   statMap[r.status]   ?? null,
+      }));
+
+      return res.status(200).json({
+        count: data.length,
+        limit,
+        offset,
+        items: data
+      });
+    } catch (err) {
+      console.error("list payments error:", err);
+      return res.status(500).json({ error: "internal_error" });
+    }
+  }
+);
+
 // Swagger setup
 app.use(
   '/docs',
