@@ -266,7 +266,46 @@ app.post("/sessions/:sessionId/end",
         used += line.length;
       }
 
-      // 4) OpenAI özet prompt'u (yalnızca BU seans — geçmiş özetler ÇIKARILDI)
+      // -- Seans zaman bilgileri (OpenAI'dan önce lazım)
+      const startedAt = new Date(sess.created);
+      const endedAt = new Date(); // şimdi bitiriyoruz
+      const durationMin = Math.max(1, Math.round((endedAt - startedAt) / 60000));
+
+      // 3.1) Konuşma yoksa → OpenAI çağırma, minimal özet yaz ve çık
+      if (convo.trim().length === 0) {
+        const minimalSummary = `===PUBLIC_BEGIN===
+# Seans Özeti
+- Bu seansta yeni bir içerik paylaşılmadı. Hazır olduğunda kaldığımız yerden devam edebiliriz.
+
+# Ödev (varsa)
+Yok
+===PUBLIC_END===
+
+===COACH_BEGIN===
+- No new data in this session.
+===COACH_END===`;
+
+        await db.query("BEGIN");
+        const { rows: upd } = await db.query(
+          `
+          UPDATE session
+          SET ended = $2,
+              summary = $3
+          WHERE id = $1
+          RETURNING id, ended
+          `,
+          [sessionId, endedAt.toISOString(), minimalSummary]
+        );
+        await db.query("COMMIT");
+
+        return res.status(200).json({
+          id: upd[0].id,
+          ended: upd[0].ended,
+          summary_preview: "Boş seans: minimal özet kaydedildi."
+        });
+      }
+
+      // 4) OpenAI özet prompt'u (yalnızca BU seans — geçmiş özetler yok)
       const sys = `
 You are a careful, concise session summarizer for a coaching app.
 Output MUST be in ${language}.
@@ -288,15 +327,12 @@ Use short sentences and clean Markdown in PUBLIC; bullet points are okay.
 If no homework exists, write "Yok" under homework.
 `;
 
-      const startedAt = new Date(sess.created);
-      const endedAt = new Date(); // şimdi bitiriyoruz
-      const durationMin = Math.max(1, Math.round((endedAt - startedAt) / 60000));
-
-      // pastSummariesBlock KALDIRILDI ⬇⬇⬇
       const userPrompt = `
 CURRENT_SESSION_META:
 - session_number: ${sess.sessionNumber}
 - started_at_iso: ${startedAt.toISOString()}
+- ended_at_iso: ${endedAt.toISOString()}
+- duration_min: ${durationMin}
 
 CURRENT_SESSION_TRANSCRIPT (chronological, role-tagged):
 ${convo}
