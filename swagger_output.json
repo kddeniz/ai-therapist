@@ -739,6 +739,83 @@
             "description": "Internal Server Error"
           }
         }
+      },
+      "get": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Geçici: ödemeleri listeler (test amaçlı)",
+        "description": "",
+        "parameters": [
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "clientId",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              3
+            ],
+            "description": "1=iOS, 2=Android, 3=Web"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "enum": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "description": "0=pending,1=completed,2=refunded,3=revoked"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "default": 100,
+            "description": "Max 200"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "default": 0
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
       }
     }
   }
