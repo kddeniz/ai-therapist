@@ -256,30 +256,7 @@ app.post("/sessions/:sessionId/end",
       const lastClient = [...msgRows].reverse().find(m => m.isClient);
       const language = (lastClient?.language || "tr").toLowerCase();
 
-      // 3) Aynı main_session içindeki ÖNCEKİ seans özetleri
-      const { rows: summaryRows } = await db.query(
-        `
-        SELECT "number", summary, created
-        FROM session
-        WHERE main_session_id = $1
-          AND "number" < $2
-          AND summary IS NOT NULL
-        ORDER BY "number" ASC
-        LIMIT 12
-        `,
-        [sess.mainSessionId, sess.sessionNumber]
-      );
-
-      const clamp = (s, n) => (!s ? "" : (s.length <= n ? s : (s.slice(0, n).trim() + "…")));
-      const pastSummariesBlock =
-        summaryRows.length === 0
-          ? "PAST_SESSIONS_SUMMARIES: none."
-          : [
-              "PAST_SESSIONS_SUMMARIES:",
-              ...summaryRows.map(r => `#${r.number} (${new Date(r.created).toISOString()}): ${clamp(r.summary, 600)}`)
-            ].join("\n");
-
-      // 4) Bu seansın konuşma metni (token korumalı kaba kesim)
+      // 3) Bu seansın konuşma metni (token korumalı kaba kesim)
       const convoLines = msgRows.map(m => `${m.isClient ? "User" : "Assistant"}: ${m.content}`);
       let convo = ""; // ~12k char'a kadar sondan al, başa ekle
       for (let i = convoLines.length - 1, used = 0; i >= 0; i--) {
@@ -289,7 +266,7 @@ app.post("/sessions/:sessionId/end",
         used += line.length;
       }
 
-      // 5) OpenAI özet prompt'u (danışan + koçun devamı için faydalı)
+      // 4) OpenAI özet prompt'u (yalnızca BU seans — geçmiş özetler ÇIKARILDI)
       const sys = `
 You are a careful, concise session summarizer for a coaching app.
 Output MUST be in ${language}.
@@ -315,9 +292,8 @@ If no homework exists, write "Yok" under homework.
       const endedAt = new Date(); // şimdi bitiriyoruz
       const durationMin = Math.max(1, Math.round((endedAt - startedAt) / 60000));
 
+      // pastSummariesBlock KALDIRILDI ⬇⬇⬇
       const userPrompt = `
-${pastSummariesBlock}
-
 CURRENT_SESSION_META:
 - session_number: ${sess.sessionNumber}
 - started_at_iso: ${startedAt.toISOString()}
