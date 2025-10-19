@@ -208,8 +208,7 @@ app.post("/sessions", async (req, res) => {
 });
 
 // Seansı bitir + OpenAI ile özet üret (danışan odaklı metin)
-app.post(
-  "/sessions/:sessionId/end",
+app.post("/sessions/:sessionId/end",
   /*
     #swagger.tags = ['Sessions']
     #swagger.summary = 'Seansı bitirir ve OpenAI ile seans özeti üretir'
@@ -396,7 +395,6 @@ Create a clear, helpful **Markdown** summary in ${language} with these sections:
     }
   }
 );
-
 
 /** ====== System Prompt (kısaltılmış, voice-only, güvenlik dahil) ====== */
 function buildSystemPrompt() {
@@ -953,7 +951,6 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
   }
 );
 
-
 // GET /therapists  — liste + filtre + sayfalama
 app.get("/therapists", async (req, res) => {
   /* 
@@ -1181,35 +1178,32 @@ app.get("/clients/:clientId/sessions", async (req, res) => {
 });
 
 // Ödeme kaydet (idempotent: (provider, transaction_id) unique)
-app.post(
-  "/payments",
+app.post("/payments",
   /*
-    #swagger.tags = ['Payments']
-    #swagger.summary = 'Ödeme kaydeder (idempotent).'
-    #swagger.requestBody = {
-      required: true,
-      content: {
-        "application/json": {
-          schema: {
-            type: "object",
-            required: ["clientId", "provider", "transactionId", "amount", "currency"],
-            properties: {
-              clientId: { type: "string", format: "uuid" },
-              sessionId: { type: "string", format: "uuid" },
-              provider: { oneOf: [{type:"string", enum:["ios","android","web"]}, {type:"integer", enum:[1,2,3]}] },
-              status: { oneOf: [{type:"string", enum:["pending","completed","refunded","revoked"]}, {type:"integer", enum:[0,1,2,3]}], default: "completed" },
-              transactionId: { type: "string" },
-              amount: { type: "number", minimum: 0 },
-              currency: { type: "string", minLength: 3, maxLength: 3, example: "TRY" },
-              paidAt: { type: "string", format: "date-time" },
-              note: { type: "string" },
-              rawPayload: { type: "object" }
-            }
-          }
-        }
+  #swagger.tags = ['Payments']
+  #swagger.summary = 'Ödeme kaydeder (idempotent).'
+  #swagger.consumes = ['application/json']
+  #swagger.parameters['body'] = {
+    in: 'body',
+    required: true,
+    schema: {
+      type: "object",
+      required: ["clientId","provider","transactionId","amount","currency"],
+      properties: {
+        clientId: { type: "string", format: "uuid" },
+        sessionId: { type: "string", format: "uuid" },
+        provider: { type:"string", enum:["ios","android","web"] },
+        status: { type:"string", enum:["pending","completed","refunded","revoked"], default:"completed" },
+        transactionId: { type: "string" },
+        amount: { type: "number", minimum: 0 },
+        currency: { type: "string", example: "TRY" },
+        paidAt: { type: "string", format: "date-time" },
+        note: { type: "string" },
+        rawPayload: { type: "object" }
       }
     }
-  */
+  }
+*/
   async (req, res) => {
     const db = await pool.connect();
     try {

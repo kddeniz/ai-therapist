@@ -524,6 +524,9 @@
         ],
         "summary": "Ödeme kaydeder (idempotent).",
         "description": "",
+        "consumes": [
+          "application/json"
+        ],
         "parameters": [
           {
             "name": "origin",
@@ -534,6 +537,175 @@
             "name": "access-control-request-headers",
             "in": "header",
             "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "example": "object"
+                },
+                "required": {
+                  "type": "array",
+                  "example": [
+                    "clientId",
+                    "provider",
+                    "transactionId",
+                    "amount",
+                    "currency"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "properties": {
+                  "type": "object",
+                  "properties": {
+                    "clientId": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "string"
+                        },
+                        "format": {
+                          "type": "string",
+                          "example": "uuid"
+                        }
+                      }
+                    },
+                    "sessionId": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "string"
+                        },
+                        "format": {
+                          "type": "string",
+                          "example": "uuid"
+                        }
+                      }
+                    },
+                    "provider": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "string"
+                        },
+                        "enum": {
+                          "type": "array",
+                          "example": [
+                            "ios",
+                            "android",
+                            "web"
+                          ],
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "status": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "string"
+                        },
+                        "enum": {
+                          "type": "array",
+                          "example": [
+                            "pending",
+                            "completed",
+                            "refunded",
+                            "revoked"
+                          ],
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "default": {
+                          "type": "string",
+                          "example": "completed"
+                        }
+                      }
+                    },
+                    "transactionId": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "string"
+                        }
+                      }
+                    },
+                    "amount": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "number"
+                        },
+                        "minimum": {
+                          "type": "number",
+                          "example": 0
+                        }
+                      }
+                    },
+                    "currency": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "string"
+                        },
+                        "example": {
+                          "type": "string",
+                          "example": "TRY"
+                        }
+                      }
+                    },
+                    "paidAt": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "string"
+                        },
+                        "format": {
+                          "type": "string",
+                          "example": "date-time"
+                        }
+                      }
+                    },
+                    "note": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "string"
+                        }
+                      }
+                    },
+                    "rawPayload": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "object"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         ],
         "responses": {
@@ -548,99 +720,6 @@
           },
           "500": {
             "description": "Internal Server Error"
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "clientId",
-                  "provider",
-                  "transactionId",
-                  "amount",
-                  "currency"
-                ],
-                "properties": {
-                  "clientId": {
-                    "type": "string",
-                    "format": "uuid"
-                  },
-                  "sessionId": {
-                    "type": "string",
-                    "format": "uuid"
-                  },
-                  "provider": {
-                    "oneOf": [
-                      {
-                        "type": "string",
-                        "enum": [
-                          "ios",
-                          "android",
-                          "web"
-                        ]
-                      },
-                      {
-                        "type": "integer",
-                        "enum": [
-                          1,
-                          2,
-                          3
-                        ]
-                      }
-                    ]
-                  },
-                  "status": {
-                    "oneOf": [
-                      {
-                        "type": "string",
-                        "enum": [
-                          "pending",
-                          "completed",
-                          "refunded",
-                          "revoked"
-                        ]
-                      },
-                      {
-                        "type": "integer",
-                        "enum": [
-                          0,
-                          1,
-                          2,
-                          3
-                        ]
-                      }
-                    ],
-                    "default": "completed"
-                  },
-                  "transactionId": {
-                    "type": "string"
-                  },
-                  "amount": {
-                    "type": "number",
-                    "minimum": 0
-                  },
-                  "currency": {
-                    "type": "string",
-                    "minLength": 3,
-                    "maxLength": 3,
-                    "example": "TRY"
-                  },
-                  "paidAt": {
-                    "type": "string",
-                    "format": "date-time"
-                  },
-                  "note": {
-                    "type": "string"
-                  },
-                  "rawPayload": {
-                    "type": "object"
-                  }
-                }
-              }
-            }
           }
         }
       }
