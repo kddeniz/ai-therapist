@@ -130,29 +130,50 @@ app.post("/sessions", async (req, res) => {
       return res.status(400).json({ error: "clientId ve therapistId zorunlu" });
     }
 
-    // 1) ÖDEME KONTROLÜ: son 31 gün içinde completed ödeme var mı?
-    const payQ = `
-      SELECT 1
-      FROM public.client_payment
+    // 0) Mevcut main_session var mı? Varsa created'ını al.
+    const msExistQ = `
+      SELECT id, created
+      FROM public.main_session
       WHERE client_id = $1
-        AND status = 1                 -- 1: completed
-        AND paid_at >= NOW() - INTERVAL '31 days'
       LIMIT 1
     `;
-    const payOk = await client.query(payQ, [clientId]);
-    if (payOk.rowCount === 0) {
-      return res.status(402).json({
-        error: "payment_required",
-        message:
-          "Aboneliğin aktif görünmüyor. Lütfen devam etmek için ödeme yap veya aboneliğini yenile."
-      });
+    const { rows: msExist } = await client.query(msExistQ, [clientId]);
+
+    let inFreeTrial = false;
+    if (msExist.length === 0) {
+      // Hiç main_session yok -> ilk seans oluşturulacak -> trial başlat
+      inFreeTrial = true;
+    } else {
+      // main_session var -> 7 gün içinde mi?
+      const msCreated = new Date(msExist[0].created);
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      inFreeTrial = msCreated >= sevenDaysAgo;
     }
 
-    // 2) ANA OTURUM & SIRA NUMARASI
-    //    Transaction içinde yapalım ki numara güvenli olsun.
+    // 1) ÖDEME KONTROLÜ (yalnızca trial değilse)
+    if (!inFreeTrial) {
+      const payQ = `
+        SELECT 1
+        FROM public.client_payment
+        WHERE client_id = $1
+          AND status = 1                 -- 1: completed
+          AND paid_at >= NOW() - INTERVAL '31 days'
+        LIMIT 1
+      `;
+      const payOk = await client.query(payQ, [clientId]);
+      if (payOk.rowCount === 0) {
+        return res.status(402).json({
+          error: "payment_required",
+          message:
+            "Aboneliğin aktif görünmüyor. Lütfen devam etmek için ödeme yap veya aboneliğini yenile."
+        });
+      }
+    }
+
+    // 2) ANA OTURUM & SIRA NUMARASI (transaction içinde)
     await client.query("BEGIN");
 
-    // Ana oturumu al/oluştur
+    // Ana oturumu al/oluştur (ilk seanssa burada oluşturulacak ve trial başlangıcı damgalanacak)
     const msQ = `SELECT public.get_or_create_main_session($1) AS main_session_id`;
     const { rows: msRows } = await client.query(msQ, [clientId]);
     const mainSessionId = msRows[0]?.main_session_id;
@@ -163,8 +184,7 @@ app.post("/sessions", async (req, res) => {
     const { rows: noRows } = await client.query(numQ, [mainSessionId]);
     let sessionNumber = noRows[0]?.next_no || 1;
 
-    // 3) SEANSI OLUŞTUR
-    //    UNIQUE (main_session_id, number) nedeniyle çok nadir yarış olursa 1 kez daha deneyeceğiz.
+    // 3) SEANSI OLUŞTUR (unique çakışmaya karşı bir deneme daha)
     const insertSession = async (number) => {
       const insQ = `
         INSERT INTO public."session"(client_id, therapist_id, main_session_id, "number")
@@ -178,13 +198,11 @@ app.post("/sessions", async (req, res) => {
     try {
       ({ rows } = await insertSession(sessionNumber));
     } catch (e) {
-      // eşzamanlı başka insert ile çakıştıysa (unique violation) bir üst numarayı dene
       const isUnique =
-        (e.code === "23505") || // unique_violation
+        (e.code === "23505") ||
         /duplicate key value violates unique constraint/i.test(String(e?.message || ""));
       if (!isUnique) throw e;
 
-      // yeni numarayı tekrar hesapla ve bir kez daha dene
       const { rows: noRows2 } = await client.query(numQ, [mainSessionId]);
       sessionNumber = noRows2[0]?.next_no || (sessionNumber + 1);
       ({ rows } = await insertSession(sessionNumber));
@@ -196,7 +214,8 @@ app.post("/sessions", async (req, res) => {
       id: rows[0].id,
       created: rows[0].created,
       number: rows[0].number,
-      mainSessionId: rows[0].main_session_id
+      mainSessionId: rows[0].main_session_id,
+      trial: inFreeTrial ? { active: true, days_left: 7 - Math.floor((Date.now() - (msExist[0]?.created ? new Date(msExist[0].created) : new Date()))/(24*60*60*1000)) } : { active: false }
     });
   } catch (err) {
     try { await client.query("ROLLBACK"); } catch { }
