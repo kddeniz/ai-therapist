@@ -470,6 +470,89 @@ Devam Planı (Koç Notu)
   }
 );
 
+// Deneme süresini yapay olarak bitir: main_session.created'i X gün geriye al
+app.post(
+  "/admin/clients/:clientId/mock-trial-expired",
+  /*
+    #swagger.tags = ['Admin', 'Testing']
+    #swagger.summary = 'TEST: Bir client’ın deneme süresini X gün geriye alarak (varsayılan 8) paywall’ı tetikler'
+    #swagger.parameters['clientId'] = { in: 'path', required: true, type: 'string', format: 'uuid' }
+    #swagger.parameters['days'] = { in: 'query', required: false, type: 'integer', default: 8, description: 'Kaç gün önceye çekilecek (>=8 önerilir)' }
+    #swagger.responses[200] = { description: 'OK' }
+    #swagger.responses[400] = { description: 'Bad Request' }
+    #swagger.responses[403] = { description: 'Forbidden (ALLOW_TEST_ENDPOINTS=1 değil)' }
+    #swagger.responses[404] = { description: 'Client bulunamadı' }
+  */
+  async (req, res) => {
+   
+
+    const { clientId } = req.params;
+    const days = Math.max(1, parseInt(String(req.query.days || "8"), 10) || 8);
+
+    // basit uuid kontrolü
+    if (!/^[0-9a-fA-F-]{36}$/.test(clientId)) {
+      return res.status(400).json({ error: "invalid_client_id" });
+    }
+
+    const db = await pool.connect();
+    try {
+      await db.query("BEGIN");
+
+      // client var mı?
+      const c = await db.query(`SELECT 1 FROM public.client WHERE id = $1`, [clientId]);
+      if (c.rowCount === 0) {
+        await db.query("ROLLBACK");
+        return res.status(404).json({ error: "client_not_found" });
+      }
+
+      // main_session'ı X gün önceye çek
+      const upd = await db.query(
+        `
+        UPDATE public.main_session
+        SET created = NOW() - ($2::int || ' days')::interval
+        WHERE client_id = $1
+        RETURNING id, created
+        `,
+        [clientId, days]
+      );
+
+      let row = upd.rows[0];
+      if (!row) {
+        // yoksa oluştur (created geçmiş tarih)
+        const ins = await db.query(
+          `
+          INSERT INTO public.main_session (client_id, created)
+          VALUES ($1, NOW() - ($2::int || ' days')::interval)
+          RETURNING id, created
+          `,
+          [clientId, days]
+        );
+        row = ins.rows[0];
+      }
+
+      await db.query("COMMIT");
+
+      // “trial aktif mi?” basit hesap
+      const created = new Date(row.created);
+      const trialActive = (Date.now() - created.getTime()) < (7 * 24 * 60 * 60 * 1000);
+
+      return res.status(200).json({
+        clientId,
+        mainSessionId: row.id,
+        mainSessionCreated: row.created,
+        shiftedDays: days,
+        trial: { active: trialActive } // büyük ihtimal false olacak (>=8 gün)
+      });
+    } catch (err) {
+      try { await db.query("ROLLBACK"); } catch {}
+      console.error("mock-trial-expired error:", err);
+      return res.status(500).json({ error: "internal_error" });
+    } finally {
+      db.release();
+    }
+  }
+);
+
 /** ====== System Prompt (kısaltılmış, voice-only, güvenlik dahil) ====== */
 function buildSystemPrompt() {
   return `

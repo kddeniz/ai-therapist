@@ -259,6 +259,63 @@
         }
       }
     },
+    "/admin/clients/{clientId}/mock-trial-expired": {
+      "post": {
+        "tags": [
+          "Admin",
+          "Testing"
+        ],
+        "summary": "TEST: Bir client’ın deneme süresini X gün geriye alarak (varsayılan 8) paywall’ı tetikler",
+        "description": "",
+        "parameters": [
+          {
+            "name": "clientId",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "default": 8,
+            "description": "Kaç gün önceye çekilecek (>=8 önerilir)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden (ALLOW_TEST_ENDPOINTS=1 değil)"
+          },
+          "404": {
+            "description": "Client bulunamadı"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
     "/sessions/{sessionId}/messages/audio": {
       "post": {
         "tags": [
