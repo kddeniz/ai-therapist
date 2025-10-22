@@ -121,6 +121,29 @@ app.post("/clients", async (req, res) => {
   }
 });
 
+// Tüm client'lar (created DESC)
+app.get(
+  "/clients",
+  /*
+    #swagger.tags = ['Clients']
+    #swagger.summary = 'Tüm client’ları created DESC sıralı döner'
+    #swagger.responses[200] = { description: 'OK' }
+  */
+  async (_req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT id, username, "language", gender, created
+        FROM public.client
+        ORDER BY created DESC
+      `);
+      return res.status(200).json(rows);
+    } catch (err) {
+      console.error("list clients error:", err);
+      return res.status(500).json({ error: "internal_error" });
+    }
+  }
+);
+
 app.post("/sessions", async (req, res) => {
   const client = await pool.connect();
   try {

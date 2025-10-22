@@ -124,6 +124,36 @@
             "description": "Internal Server Error"
           }
         }
+      },
+      "get": {
+        "tags": [
+          "Clients"
+        ],
+        "summary": "Tüm client’ları created DESC sıralı döner",
+        "description": "",
+        "parameters": [
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
       }
     },
     "/sessions": {
