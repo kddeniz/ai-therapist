@@ -475,17 +475,14 @@ app.post(
   "/admin/clients/:clientId/mock-trial-expired",
   /*
     #swagger.tags = ['Admin', 'Testing']
-    #swagger.summary = 'TEST: Bir client’ın deneme süresini X gün geriye alarak (varsayılan 8) paywall’ı tetikler'
+    #swagger.summary = 'TEST: Bir client’ın deneme süresini X gün geriye alır ve TÜM ödemelerini siler (paywall test)'
     #swagger.parameters['clientId'] = { in: 'path', required: true, type: 'string', format: 'uuid' }
     #swagger.parameters['days'] = { in: 'query', required: false, type: 'integer', default: 8, description: 'Kaç gün önceye çekilecek (>=8 önerilir)' }
     #swagger.responses[200] = { description: 'OK' }
     #swagger.responses[400] = { description: 'Bad Request' }
-    #swagger.responses[403] = { description: 'Forbidden (ALLOW_TEST_ENDPOINTS=1 değil)' }
     #swagger.responses[404] = { description: 'Client bulunamadı' }
   */
   async (req, res) => {
-   
-
     const { clientId } = req.params;
     const days = Math.max(1, parseInt(String(req.query.days || "8"), 10) || 8);
 
@@ -505,7 +502,14 @@ app.post(
         return res.status(404).json({ error: "client_not_found" });
       }
 
-      // main_session'ı X gün önceye çek
+      // 1) TÜM ödemeleri sil (paywall testini kolaylaştırmak için)
+      const del = await db.query(
+        `DELETE FROM public.client_payment WHERE client_id = $1`,
+        [clientId]
+      );
+      const deletedPayments = del.rowCount || 0;
+
+      // 2) main_session'ı X gün önceye çek (yoksa geçmiş tarihli oluştur)
       const upd = await db.query(
         `
         UPDATE public.main_session
@@ -518,7 +522,6 @@ app.post(
 
       let row = upd.rows[0];
       if (!row) {
-        // yoksa oluştur (created geçmiş tarih)
         const ins = await db.query(
           `
           INSERT INTO public.main_session (client_id, created)
@@ -541,7 +544,8 @@ app.post(
         mainSessionId: row.id,
         mainSessionCreated: row.created,
         shiftedDays: days,
-        trial: { active: trialActive } // büyük ihtimal false olacak (>=8 gün)
+        deletedPayments,                // 👈 kaç ödeme silindi
+        trial: { active: trialActive }  // genelde false (>=8 gün)
       });
     } catch (err) {
       try { await db.query("ROLLBACK"); } catch {}

@@ -265,7 +265,7 @@
           "Admin",
           "Testing"
         ],
-        "summary": "TEST: Bir client’ın deneme süresini X gün geriye alarak (varsayılan 8) paywall’ı tetikler",
+        "summary": "TEST: Bir client’ın deneme süresini X gün geriye alır ve TÜM ödemelerini siler (paywall test)",
         "description": "",
         "parameters": [
           {
@@ -303,9 +303,6 @@
           },
           "400": {
             "description": "Bad Request"
-          },
-          "403": {
-            "description": "Forbidden (ALLOW_TEST_ENDPOINTS=1 değil)"
           },
           "404": {
             "description": "Client bulunamadı"
