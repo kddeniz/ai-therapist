@@ -16,6 +16,10 @@ const { v4: uuidv4 } = require("uuid"); // uuid kütüphanesini ekleyin (npm ins
 const app = express();
 const swaggerUi = require('swagger-ui-express')
 
+// NEW: App Review kullanıcısı (paywall bypass)
+const SKIP_PAYWALL_USER = 'gilfoyledinesh';
+
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL ? { rejectUnauthorized: false } : false
@@ -153,6 +157,17 @@ app.post("/sessions", async (req, res) => {
       return res.status(400).json({ error: "clientId ve therapistId zorunlu" });
     }
 
+    // NEW: client username'i al ve bypass bayrağını hesapla
+    const { rows: cRows } = await client.query(
+      `SELECT username FROM public.client WHERE id = $1 LIMIT 1`,
+      [clientId]
+    );
+    if (cRows.length === 0) {
+      return res.status(404).json({ error: "client_not_found" });
+    }
+    const skipPaywall = String(cRows[0].username || "").toLowerCase() === SKIP_PAYWALL_USER;
+
+
     // 0) Mevcut main_session var mı? Varsa created'ını al.
     const msExistQ = `
       SELECT id, created
@@ -173,14 +188,14 @@ app.post("/sessions", async (req, res) => {
       inFreeTrial = msCreated >= sevenDaysAgo;
     }
 
-    // 1) ÖDEME KONTROLÜ (yalnızca trial değilse)
-    if (!inFreeTrial) {
+    // 1) ÖDEME KONTROLÜ (yalnızca trial DEĞİLSE ve bypass YOKSA ödeme kontrolü yap)
+    if (!inFreeTrial && !skipPaywall) {
       const payQ = `
         SELECT 1
         FROM public.client_payment
         WHERE client_id = $1
           AND status = 1                 -- 1: completed
-          AND paid_at >= NOW() - INTERVAL '31 days'
+          AND paid_at >= NOW() - INTERVAL '32 days'
         LIMIT 1
       `;
       const payOk = await client.query(payQ, [clientId]);

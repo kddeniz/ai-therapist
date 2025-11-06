@@ -199,6 +199,9 @@
           "402": {
             "description": "Payment Required"
           },
+          "404": {
+            "description": "Not Found"
+          },
           "500": {
             "description": "Internal Server Error"
           }
