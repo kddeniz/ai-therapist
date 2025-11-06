@@ -126,8 +126,7 @@ app.post("/clients", async (req, res) => {
 });
 
 // Tüm client'lar (created DESC)
-app.get(
-  "/clients",
+app.get("/clients",
   /*
     #swagger.tags = ['Clients']
     #swagger.summary = 'Tüm client’ları created DESC sıralı döner'
@@ -486,8 +485,7 @@ Devam Planı (Koç Notu)
 );
 
 // Deneme süresini yapay olarak bitir: main_session.created'i X gün geriye al
-app.post(
-  "/admin/clients/:clientId/mock-trial-expired",
+app.post("/admin/clients/:clientId/mock-trial-expired",
   /*
     #swagger.tags = ['Admin', 'Testing']
     #swagger.summary = 'TEST: Bir client’ın deneme süresini X gün geriye alır ve TÜM ödemelerini siler (paywall test)'
@@ -1214,8 +1212,8 @@ app.get("/sessions/:sessionId/summary",
         String(req.query.coach || "0") === "1" ||
         String(req.query.include || "").toLowerCase() === "coach=1";
 
-      // -- DB: özet çek
-      const { rows } = await pool.query(
+      // -- DB: seansı ve özeti çek
+      let { rows } = await pool.query(
         `
         SELECT
           s.id,
@@ -1232,8 +1230,48 @@ app.get("/sessions/:sessionId/summary",
       );
       if (rows.length === 0) return res.status(404).json({ error: "session_not_found" });
 
-      const s = rows[0];
-      if (!s.summary) return res.status(404).json({ error: "summary_not_found" });
+      let s = rows[0];
+
+      // --- ÖZET YOKSA: /sessions/:id/end çağır, sonra tekrar çek ---
+      if (!s.summary) {
+        const baseURL =
+          process.env.INTERNAL_BASE_URL ||
+          `${req.protocol}://${req.get("host")}`;
+
+        // force=0 → zaten bittiyse dokunmaz; bitmediyse bitirip özet üretir
+        const endResp = await fetch(
+          `${baseURL}/sessions/${encodeURIComponent(sessionId)}/end?force=0`,
+          { method: "POST", headers: { "Content-Type": "application/json" } }
+        );
+
+        // end başarılıysa DB’den özeti tekrar yükle
+        if (endResp.ok) {
+          const r2 = await pool.query(
+            `
+            SELECT
+              s.id,
+              s.main_session_id AS "mainSessionId",
+              s.number          AS "sessionNumber",
+              s.created,
+              s.ended,
+              s.summary
+            FROM session s
+            WHERE s.id = $1
+            LIMIT 1
+            `,
+            [sessionId]
+          );
+          if (r2.rows.length) s = r2.rows[0];
+        } else {
+          // end çağrısı başarısız ise mevcut davranışı koru
+          return res.status(404).json({ error: "summary_not_found" });
+        }
+
+        // hâlâ özet yoksa (örn. konuşma yoktu) 404 döndür
+        if (!s.summary) {
+          return res.status(404).json({ error: "summary_not_found" });
+        }
+      }
 
       // -- Ayraçlı blokları çıkar (PUBLIC / COACH)
       function extractBlocks(md) {
@@ -1249,10 +1287,8 @@ app.get("/sessions/:sessionId/summary",
 
       // Geriye dönük uyumluluk: ayraç yoksa tüm metni PUBLIC say
       const effectivePublic = publicMd || s.summary;
-      const effectiveCoach = publicMd ? (includeCoach ? (coachMd || null) : null) : (includeCoach ? null : null);
-      // Not: Ayraç yoksa coachMd yok sayılır (gizli içerik yok)
 
-      // -- İçerik: döndürülecek MD metni (PUBLIC + opsiyonel COACH)
+      // İçerik: döndürülecek MD metni (PUBLIC + opsiyonel COACH)
       const combinedMd = includeCoach && coachMd
         ? `${effectivePublic}\n\n---\n\n<!-- Coach Only -->\n\n${coachMd}`
         : effectivePublic;
@@ -1268,30 +1304,22 @@ app.get("/sessions/:sessionId/summary",
       // -- HTML gerekiyorsa basit bir dönüştürücü
       if (fmt === "html" || fmt === "markdown+html") {
         const md = combinedMd;
-
         const escapeHtml = (str) =>
           str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
         const toHtml = (markdown) => {
-          // çok basit bir markdown→html (paketsiz)
           let html = escapeHtml(markdown)
             .replace(/^### (.*)$/gmi, "<h3>$1</h3>")
             .replace(/^## (.*)$/gmi, "<h2>$1</h2>")
             .replace(/^# (.*)$/gmi, "<h1>$1</h1>")
             .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
             .replace(/\*(.*?)\*/g, "<em>$1</em>")
-            // listeler
             .replace(/^\s*\d+\.\s+(.*)$/gmi, "<li>$1</li>")
             .replace(/^\s*-\s+(.*)$/gmi, "<li>$1</li>")
-            // paragraflar & satırlar
             .replace(/\n{2,}/g, "</p><p>")
             .replace(/\n/g, "<br/>");
-
-          // tüm <li>’leri <ul> içine al (basit yaklaşım)
           html = html.replace(/(<li>[\s\S]*?<\/li>)/gms, "<ul>$1</ul>");
           return `<article class="summary">${html}</article>`;
         };
-
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         return res.status(200).send(toHtml(md));
       }
@@ -1303,8 +1331,8 @@ app.get("/sessions/:sessionId/summary",
         sessionNumber: s.sessionNumber,
         created: s.created,
         ended: s.ended,
-        summary_markdown: effectivePublic,
-        coach_markdown: includeCoach ? coachMd || null : undefined
+        summary_markdown: publicMd ? publicMd : s.summary, // ayraç yoksa tamamı
+        coach_markdown: includeCoach ? (coachMd || null) : undefined
       });
     } catch (err) {
       console.error("get session summary error:", err);
