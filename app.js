@@ -18,7 +18,7 @@ const swaggerUi = require('swagger-ui-express')
 
 // NEW: App Review kullanıcısı (paywall bypass)
 const SKIP_PAYWALL_USER = 'gilfoyledinesh';
-
+const FORCE_PAYWALL_USER = 'dineshgilfoyle';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -164,7 +164,11 @@ app.post("/sessions", async (req, res) => {
     if (cRows.length === 0) {
       return res.status(404).json({ error: "client_not_found" });
     }
-    const skipPaywall = String(cRows[0].username || "").toLowerCase() === SKIP_PAYWALL_USER;
+
+    const uname = String(cRows[0].username || "").toLowerCase();    // NEW
+    const skipPaywall = uname === SKIP_PAYWALL_USER;               // (mevcut satırı buna çevir)
+    const forcePaywall = uname === FORCE_PAYWALL_USER;              // NEW
+
 
 
     // 0) Mevcut main_session var mı? Varsa created'ını al.
@@ -185,6 +189,10 @@ app.post("/sessions", async (req, res) => {
       const msCreated = new Date(msExist[0].created);
       const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
       inFreeTrial = msCreated >= sevenDaysAgo;
+    }
+
+    if (forcePaywall) {
+      inFreeTrial = false;  // NEW: reviewer için ilk seansta bile paywall aktif
     }
 
     // 1) ÖDEME KONTROLÜ (yalnızca trial DEĞİLSE ve bypass YOKSA ödeme kontrolü yap)
@@ -252,7 +260,7 @@ app.post("/sessions", async (req, res) => {
       created: rows[0].created,
       number: rows[0].number,
       mainSessionId: rows[0].main_session_id,
-      trial: inFreeTrial ? { active: true, days_left: 7 - Math.floor((Date.now() - (msExist[0]?.created ? new Date(msExist[0].created) : new Date()))/(24*60*60*1000)) } : { active: false }
+      trial: inFreeTrial ? { active: true, days_left: 7 - Math.floor((Date.now() - (msExist[0]?.created ? new Date(msExist[0].created) : new Date())) / (24 * 60 * 60 * 1000)) } : { active: false }
     });
   } catch (err) {
     try { await client.query("ROLLBACK"); } catch { }
@@ -561,7 +569,7 @@ app.post("/admin/clients/:clientId/mock-trial-expired",
         trial: { active: trialActive }  // genelde false (>=8 gün)
       });
     } catch (err) {
-      try { await db.query("ROLLBACK"); } catch {}
+      try { await db.query("ROLLBACK"); } catch { }
       console.error("mock-trial-expired error:", err);
       return res.status(500).json({ error: "internal_error" });
     } finally {
@@ -1556,13 +1564,13 @@ app.get("/payments",
       const {
         clientId = null,
         provider = null, // 1=iOS,2=Android,3=Web
-        status   = null, // 0=pending,1=completed,2=refunded,3=revoked
+        status = null, // 0=pending,1=completed,2=refunded,3=revoked
       } = req.query;
 
-      let limit  = parseInt(req.query.limit ?? "100", 10);
+      let limit = parseInt(req.query.limit ?? "100", 10);
       let offset = parseInt(req.query.offset ?? "0", 10);
-      if (!Number.isFinite(limit)  || limit  <= 0) limit = 100;
-      if (!Number.isFinite(offset) || offset < 0)  offset = 0;
+      if (!Number.isFinite(limit) || limit <= 0) limit = 100;
+      if (!Number.isFinite(offset) || offset < 0) offset = 0;
       if (limit > 200) limit = 200;
 
       const where = [];
@@ -1571,7 +1579,7 @@ app.get("/payments",
 
       if (clientId) add(`p.client_id = $?::uuid`, clientId);
       if (provider !== null && provider !== undefined && `${provider}` !== "") add(`p.provider = $?::int`, Number(provider));
-      if (status   !== null   && status   !== undefined   && `${status}`   !== "") add(`p.status   = $?::int`, Number(status));
+      if (status !== null && status !== undefined && `${status}` !== "") add(`p.status   = $?::int`, Number(status));
 
       const sql = `
         SELECT
@@ -1605,7 +1613,7 @@ app.get("/payments",
       const data = rows.map(r => ({
         ...r,
         providerLabel: provMap[r.provider] ?? null,
-        statusLabel:   statMap[r.status]   ?? null,
+        statusLabel: statMap[r.status] ?? null,
       }));
 
       return res.status(200).json({
