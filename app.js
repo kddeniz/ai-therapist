@@ -35,6 +35,27 @@ const ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech";
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"; // Responses API kullanıyorsanız onu koyun
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
+
+// --- Helpers
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)] }
+
+function fallbackUtterance(lang = "tr") {
+  const tr = [
+    "Seni duyamadım gibi oldu, bir daha söyleyebilir misin?",
+    "Sanırım ses gelmedi. Tekrar denemeni rica edebilir miyim?",
+    "Kayıt sessiz olabilir. Dilersen bir kez daha söyle.",
+    "Üzgünüm, anlayamadım. Bir kere daha anlatır mısın?"
+  ];
+  const en = [
+    "I couldn’t quite hear that—could you please repeat?",
+    "It seems the audio was silent. Could you try again?",
+    "Sorry, I didn’t catch that. Mind saying it once more?",
+    "I might have missed it—please repeat when you’re ready."
+  ];
+  return (String(lang).toLowerCase().startsWith("tr") ? pick(tr) : pick(en));
+}
+//
+
 app.use(express.json()); // JSON body okumak için
 
 //CORS setup
@@ -859,36 +880,123 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
       let timer = Date.now();
 
       // ============== 1) STT ==============
-      const sttResp = await fetch(ELEVEN_STT_URL, {
-        method: "POST",
-        headers: { "xi-api-key": process.env.ELEVEN_API_KEY },
-        body: (() => {
-          const fd = new FormData();
-          fd.append(
-            "file",
-            new Blob([req.file.buffer], { type: req.file.mimetype || "audio/ogg" }),
-            req.file.originalname || "audio.ogg"
-          );
-          fd.append("model_id", "scribe_v1");
-          if (language) fd.append("language_code", language);
-          fd.append("diarize", "false");
-          fd.append("num_speakers", "1");
-          fd.append("timestamps_granularity", "none");
-          fd.append("tag_audio_events", "false");
-          return fd;
-        })(),
-      });
+      let sttJson;
+      let userText = "";
+      let sttFailed = false;
+      try {
+        const sttResp = await fetch(ELEVEN_STT_URL, {
+          method: "POST",
+          headers: { "xi-api-key": process.env.ELEVEN_API_KEY },
+          body: (() => {
+            const fd = new FormData();
+            fd.append(
+              "file",
+              new Blob([req.file.buffer], { type: req.file.mimetype || "audio/ogg" }),
+              req.file.originalname || "audio.ogg"
+            );
+            fd.append("model_id", "scribe_v1");
+            if (language) fd.append("language_code", language);
+            fd.append("diarize", "false");
+            fd.append("num_speakers", "1");
+            fd.append("timestamps_granularity", "none");
+            fd.append("tag_audio_events", "false");
+            return fd;
+          })(),
+        });
 
-      if (!sttResp.ok) {
-        const txt = await sttResp.text().catch(() => "");
-        throw new Error(`ElevenLabs STT failed: ${sttResp.status} ${txt}`);
+        if (!sttResp.ok) {
+          sttFailed = true;
+        } else {
+          sttJson = await sttResp.json();
+          userText = sttJson.text || sttJson.transcript || "";
+          if (!userText || !userText.trim()) sttFailed = true;
+        }
+      } catch (_e) {
+        sttFailed = true;
       }
-      const sttJson = await sttResp.json();
-      const userText = sttJson.text || sttJson.transcript || "";
-      if (!userText) throw new Error("Empty transcript from STT");
 
       console.log("s2t: " + (Date.now() - timer));
       timer = Date.now();
+
+      // === NEW: Fallback yolu (STT başarısız/boş ise) ===
+      if (sttFailed) {
+        const aiText = fallbackUtterance(language);
+
+        // DB'ye SADECE asistan cevabını yaz (kullanıcı mesajı yoksa)
+        await client.query("BEGIN");
+        const insertAiOnly = `
+    INSERT INTO message (session_id, created, language, is_client, content)
+    VALUES ($1, NOW(), $2, FALSE, $3)
+    RETURNING id, created
+  `;
+        const { rows: aiOnlyRows } = await client.query(insertAiOnly, [sessionId, language, aiText]);
+        const aiMessageId = aiOnlyRows[0].id;
+        await client.query("COMMIT");
+
+        // TTS dene; olmazsa yine de 200/201 dön, sadece metinle
+        try {
+          const ttsResp = await fetch(
+            `${ELEVEN_TTS_URL}/${encodeURIComponent(/* mevcut */(await (async () => {
+              // therapist voice id’sini çekmek için hızlı sorgu (tek satır)
+              const { rows: vrows } = await client.query(
+                `SELECT t.voice_id
+             FROM session s
+             LEFT JOIN therapist t ON t.id = s.therapist_id
+            WHERE s.id = $1
+            LIMIT 1`, [sessionId]);
+              return vrows[0]?.voice_id || "Rachel"; // yedek isim opsiyonel
+            })()))}`,
+            {
+              method: "POST",
+              headers: {
+                "xi-api-key": process.env.ELEVEN_API_KEY,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                text: aiText,
+                voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+                model_id: "eleven_flash_v2_5",
+                output_format: "mp3_22050_32",
+              }),
+            }
+          );
+
+          if (ttsResp.ok) {
+            const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
+            if (streamAudio) {
+              res.setHeader("Content-Type", "audio/mpeg");
+              res.setHeader("Content-Disposition", `inline; filename="reply.mp3"`);
+              return res.send(audioBuffer);
+            } else {
+              const b64 = audioBuffer.toString("base64");
+              return res.status(201).json({
+                sessionId,
+                userMessageId: null,
+                aiMessageId,
+                transcript: "",     // STT boş/hatalı
+                aiText,
+                audioBase64: b64,
+                audioMime: "audio/mpeg",
+                fallback: true
+              });
+            }
+          }
+        } catch (_) {
+          // TTS de başarısız olabilir; yine de metni döndürelim
+        }
+
+        // TTS başarısızsa sadece metinle dön
+        return res.status(201).json({
+          sessionId,
+          userMessageId: null,
+          aiMessageId,
+          transcript: "",
+          aiText,
+          audioBase64: null,
+          audioMime: null,
+          fallback: true
+        });
+      }
 
       // ============== 2) DB: Kullanıcı mesajını yaz (BEGIN) ==============
       await client.query("BEGIN");
