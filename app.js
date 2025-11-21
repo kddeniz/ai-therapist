@@ -188,7 +188,8 @@ app.post("/sessions", async (req, res) => {
 
     const uname = String(cRows[0].username || "").toLowerCase();    // NEW
     const skipPaywall = uname === SKIP_PAYWALL_USER;               // (mevcut satırı buna çevir)
-    const forcePaywall = uname === FORCE_PAYWALL_USER;              // NEW
+    //const forcePaywall = uname === FORCE_PAYWALL_USER;              // NEW
+    const forcePaywall = true;              // NEW
 
 
 
