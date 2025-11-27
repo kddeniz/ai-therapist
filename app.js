@@ -221,7 +221,7 @@ app.post("/sessions", async (req, res) => {
     const msExistQ = `
       SELECT id, created
       FROM public.main_session
-      WHERE client_id = $1 and deleted = 0
+      WHERE client_id = $1 and deleted = FALSE
       LIMIT 1
     `;
     const { rows: msExist } = await client.query(msExistQ, [clientId]);
@@ -1502,7 +1502,7 @@ app.get("/clients/:clientId/sessions", async (req, res) => {
     offset = Math.max(parseInt(offset, 10) || 0, 0);
     const order = sort === 'created_asc' ? 'ASC' : 'DESC';
 
-    const where = ['s.client_id = $1', 's.deleted = 0'];
+    const where = ['s.client_id = $1', 's.deleted = FALSE'];
     const params = [clientId];
 
     if (status === 'active') where.push('s.ended IS NULL');
