@@ -97,6 +97,9 @@
             "schema": {
               "type": "object",
               "properties": {
+                "clientId": {
+                  "example": "any"
+                },
                 "username": {
                   "example": "any"
                 },
@@ -614,6 +617,51 @@
           },
           "204": {
             "description": "No Content"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/clients/{clientId}/reset": {
+      "post": {
+        "tags": [
+          "Clients"
+        ],
+        "summary": "Bir client’ın tüm main_session ve session kayıtlarını soft-delete eder",
+        "description": "",
+        "parameters": [
+          {
+            "name": "clientId",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reset işlemi tamamlandı"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Geçersiz clientId"
+          },
+          "404": {
+            "description": "Client bulunamadı"
           },
           "500": {
             "description": "Internal Server Error"

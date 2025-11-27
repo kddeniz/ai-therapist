@@ -120,26 +120,53 @@ app.get('/', (req, res) => {
 
 app.post("/clients", async (req, res) => {
   try {
-    const { username, gender, language } = req.body;
+    const { clientId, username, gender, language } = req.body;
 
     // basit validasyon
     if (!username || !language || gender === undefined) {
       return res.status(400).json({ error: "username, gender ve language gerekli" });
     }
 
-    // yeni id üret (tablonuzda DEFAULT olsa bile explicit gönderebiliriz)
-    const id = uuidv4();
+    // 1) clientId gönderilmişse onu kullan, yoksa yeni uuid üret
+    const id = clientId && String(clientId).trim() !== "" ? clientId : uuidv4();
 
-    const query = `
-      INSERT INTO client (id, username, gender, language)
-      VALUES ($1, $2, $3, $4)
-      RETURNING id
-    `;
+    // 2) Bu ID var mı?
+    const existing = await pool.query(
+      `SELECT id FROM client WHERE id = $1 LIMIT 1`,
+      [id]
+    );
 
-    const values = [id, username, gender, language];
-    const { rows } = await pool.query(query, values);
+    let result;
 
-    res.status(201).json({ id: rows[0].id });
+    if (existing.rowCount > 0) {
+      // --- UPDATE mevcut client ---
+      const upd = await pool.query(
+        `
+        UPDATE client
+        SET username = $2,
+            gender   = $3,
+            language = $4
+        WHERE id = $1
+        RETURNING id
+        `,
+        [id, username, gender, language]
+      );
+      result = upd.rows[0];
+    } else {
+      // --- INSERT yeni client ---
+      const ins = await pool.query(
+        `
+        INSERT INTO client (id, username, gender, language)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+        `,
+        [id, username, gender, language]
+      );
+      result = ins.rows[0];
+    }
+
+    return res.status(201).json({ id: result.id });
+
   } catch (err) {
     console.error("createClient error:", err);
     res.status(500).json({ error: "internal_error" });
@@ -194,7 +221,7 @@ app.post("/sessions", async (req, res) => {
     const msExistQ = `
       SELECT id, created
       FROM public.main_session
-      WHERE client_id = $1
+      WHERE client_id = $1 and deleted = 0
       LIMIT 1
     `;
     const { rows: msExist } = await client.query(msExistQ, [clientId]);
@@ -1475,7 +1502,7 @@ app.get("/clients/:clientId/sessions", async (req, res) => {
     offset = Math.max(parseInt(offset, 10) || 0, 0);
     const order = sort === 'created_asc' ? 'ASC' : 'DESC';
 
-    const where = ['s.client_id = $1'];
+    const where = ['s.client_id = $1', 's.deleted = 0'];
     const params = [clientId];
 
     if (status === 'active') where.push('s.ended IS NULL');
@@ -1518,6 +1545,79 @@ app.get("/clients/:clientId/sessions", async (req, res) => {
     res.status(500).json({ error: "internal_error" });
   }
 });
+
+app.post("/clients/:clientId/reset",
+  /*
+    #swagger.tags = ['Clients']
+    #swagger.summary = 'Bir client’ın tüm main_session ve session kayıtlarını soft-delete eder'
+    #swagger.parameters['clientId'] = { in: 'path', required: true, type: 'string', format: 'uuid' }
+    #swagger.responses[200] = { description: 'Reset işlemi tamamlandı' }
+    #swagger.responses[400] = { description: 'Geçersiz clientId' }
+    #swagger.responses[404] = { description: 'Client bulunamadı' }
+  */
+  async (req, res) => {
+    const { clientId } = req.params;
+
+    // Basit UUID validasyonu
+    if (!/^[0-9a-fA-F-]{36}$/.test(clientId)) {
+      return res.status(400).json({ error: "invalid_client_id" });
+    }
+
+    const db = await pool.connect();
+    try {
+      await db.query("BEGIN");
+
+      // Client var mı?
+      const { rows: cRows } = await db.query(
+        `SELECT id, username FROM public.client WHERE id = $1 LIMIT 1`,
+        [clientId]
+      );
+      if (cRows.length === 0) {
+        await db.query("ROLLBACK");
+        return res.status(404).json({ error: "client_not_found" });
+      }
+
+      const username = cRows[0].username || null;
+
+      // main_session kayıtlarını soft-delete et
+      const msResult = await db.query(
+        `
+        UPDATE public.main_session
+        SET deleted = true
+        WHERE client_id = $1
+          AND deleted = false
+        `,
+        [clientId]
+      );
+
+      // session kayıtlarını soft-delete et
+      const sResult = await db.query(
+        `
+        UPDATE public."session"
+        SET deleted = true
+        WHERE client_id = $1
+          AND deleted = false
+        `,
+        [clientId]
+      );
+
+      await db.query("COMMIT");
+
+      return res.status(200).json({
+        clientId,
+        username,
+        mainSessionsDeleted: msResult.rowCount,
+        sessionsDeleted: sResult.rowCount,
+      });
+    } catch (err) {
+      try { await db.query("ROLLBACK"); } catch {}
+      console.error("admin reset client error:", err);
+      return res.status(500).json({ error: "internal_error" });
+    } finally {
+      db.release();
+    }
+  }
+);
 
 // Ödeme kaydet (idempotent: (provider, transaction_id) unique)
 app.post("/payments",
