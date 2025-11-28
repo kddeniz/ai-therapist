@@ -249,13 +249,31 @@ app.post("/sessions", async (req, res) => {
     // 1) ÖDEME KONTROLÜ (yalnızca trial DEĞİLSE ve bypass YOKSA ödeme kontrolü yap)
     if (!inFreeTrial && !skipPaywall) {
       const payQ = `
-        SELECT 1
-        FROM public.client_payment
-        WHERE client_id = $1
-          AND status = 1                 -- 1: completed
+    SELECT 1
+    FROM public.client_payment
+    WHERE client_id = $1
+      AND status = 1                 -- 1: completed
+      AND (
+        -- RevenueCat payload'ı varsa: expiresDate / latestExpirationDate'e göre karar ver
+        (
+          raw_payload IS NOT NULL
+          AND COALESCE(
+                NULLIF(
+                  (raw_payload::jsonb -> 'subscription'  ->> 'expiresDate'),
+                  ''
+                ),
+                (raw_payload::jsonb -> 'customerInfo' ->> 'latestExpirationDate')
+              )::timestamptz >= NOW()
+        )
+        -- Eski / manuel ödemeler veya payload olmayan kayıtlar için eski fallback:
+        OR (
+          raw_payload IS NULL
           AND paid_at >= NOW() - INTERVAL '32 days'
-        LIMIT 1
-      `;
+        )
+      )
+    LIMIT 1
+  `;
+
       const payOk = await client.query(payQ, [clientId]);
       if (payOk.rowCount === 0) {
         return res.status(402).json({
