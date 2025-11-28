@@ -1667,7 +1667,7 @@ app.post("/clients/:clientId/reset",
       const username = cRows[0].username || null;
 
       // main_session kayıtlarını soft-delete et
-      const msResult = await db.query(
+      /*const msResult = await db.query(
         `
         UPDATE public.main_session
         SET deleted = true
@@ -1675,7 +1675,7 @@ app.post("/clients/:clientId/reset",
           AND deleted = false
         `,
         [clientId]
-      );
+      );*/
 
       // session kayıtlarını soft-delete et
       const sResult = await db.query(
@@ -1693,7 +1693,7 @@ app.post("/clients/:clientId/reset",
       return res.status(200).json({
         clientId,
         username,
-        mainSessionsDeleted: msResult.rowCount,
+        mainSessionsDeleted: 0,
         sessionsDeleted: sResult.rowCount,
       });
     } catch (err) {
