@@ -58,6 +58,11 @@ function fallbackUtterance(lang = "tr") {
 
 app.use(express.json()); // JSON body okumak için
 
+app.use(
+  "/static",
+  express.static(path.join(__dirname, "public"))
+);
+
 //CORS setup
 app.use((req, res, next) => {
   // Origin'i aynen yansıt (veya '*' de olur; cookie kullanmıyorsan fark etmez)
@@ -1334,6 +1339,70 @@ app.get("/therapists", async (req, res) => {
   }
 });
 
+app.get("/therapists/:therapistId/voice-preview",
+  /*
+    #swagger.tags = ['Therapists']
+    #swagger.summary = 'Terapistin ses örneği (preview) URL’ini döner'
+    #swagger.parameters['therapistId'] = {
+      in: 'path', required: true, type: 'string', format: 'uuid'
+    }
+    #swagger.responses[200] = {
+      description: 'Ses örneği bulundu',
+      content: {
+        "application/json": {
+          schema: {
+            type: "object",
+            properties: {
+              therapistId: { type: "string", format: "uuid" },
+              audioPreviewUrl: { type: "string" }
+            }
+          }
+        }
+      }
+    }
+    #swagger.responses[404] = { description: 'Terapist veya ses örneği bulunamadı' }
+  */
+  async (req, res) => {
+    try {
+      const { therapistId } = req.params;
+
+      // basit uuid kontrolü (opsiyonel ama iyi)
+      if (!/^[0-9a-fA-F-]{36}$/.test(therapistId)) {
+        return res.status(400).json({ error: "invalid_therapist_id" });
+      }
+
+      const { rows } = await pool.query(
+        `
+        SELECT id, audio_preview_url
+        FROM public.therapist
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [therapistId]
+      );
+
+      if (rows.length === 0) {
+        return res.status(404).json({ error: "therapist_not_found" });
+      }
+
+      const t = rows[0];
+
+      if (!t.audio_preview_url) {
+        // terapist var ama ses örneği yok
+        return res.status(404).json({ error: "voice_preview_not_found" });
+      }
+
+      return res.status(200).json({
+        therapistId: t.id,
+        audioUrl: t.audio_preview_url,
+      });
+    } catch (err) {
+      console.error("get therapist voice preview error:", err);
+      return res.status(500).json({ error: "internal_error" });
+    }
+  }
+);
+
 // Seans özeti getir (Markdown ya da opsiyonel HTML)
 app.get("/sessions/:sessionId/summary",
   /*
@@ -1610,7 +1679,7 @@ app.post("/clients/:clientId/reset",
         sessionsDeleted: sResult.rowCount,
       });
     } catch (err) {
-      try { await db.query("ROLLBACK"); } catch {}
+      try { await db.query("ROLLBACK"); } catch { }
       console.error("admin reset client error:", err);
       return res.status(500).json({ error: "internal_error" });
     } finally {

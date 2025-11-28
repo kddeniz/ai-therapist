@@ -477,6 +477,67 @@
         }
       }
     },
+    "/therapists/{therapistId}/voice-preview": {
+      "get": {
+        "tags": [
+          "Therapists"
+        ],
+        "summary": "Terapistin ses örneği (preview) URL’ini döner",
+        "description": "",
+        "parameters": [
+          {
+            "name": "therapistId",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ses örneği bulundu",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "therapistId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "audioPreviewUrl": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "404": {
+            "description": "Terapist veya ses örneği bulunamadı"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
     "/sessions/{sessionId}/summary": {
       "get": {
         "tags": [
