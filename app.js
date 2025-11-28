@@ -1904,6 +1904,136 @@ app.get("/payments",
   }
 );
 
+// Yeni endpoint: RevenueCat webhook
+app.post("/webhooks/revenuecat",
+  /*
+    #swagger.tags = ['Payments', 'Webhooks']
+    #swagger.summary = 'RevenueCat abonelik webhook’u. Yenileme vb. ödemeleri client_payment tablosuna işler.'
+    #swagger.consumes = ['application/json']
+    #swagger.responses[200] = { description: 'OK' }
+    #swagger.responses[400] = { description: 'Bad Request' }
+  */
+  async (req, res) => {
+    const db = await pool.connect();
+    try {
+      const payload = req.body || {};
+      const event = payload.event || payload; // bazı config’lerde doğrudan root’ta olabilir
+
+      // --- 1) Gerekli alanları çek ---
+      const clientId = event.app_user_id;          // RevenueCat tarafında app_user_id = bizim clientId
+      const transactionId = event.transaction_id;  // benzersiz transaction
+      const rcEventType = String(event.type || "").toUpperCase();
+      const store = String(event.store || "").toLowerCase(); // app_store, play_store, stripe, vb.
+
+      // Fiyat & para birimi
+      const amount = typeof event.price === "number" ? event.price : null;
+      const currency = event.currency ? String(event.currency).toUpperCase() : null;
+
+      // Tarih (ms epoch veya ISO)
+      let paidAt = null;
+      if (event.purchased_at_ms) {
+        const ms = Number(event.purchased_at_ms);
+        if (!Number.isNaN(ms)) paidAt = new Date(ms).toISOString();
+      } else if (event.purchased_at) {
+        const dt = new Date(event.purchased_at);
+        if (!isNaN(dt.getTime())) paidAt = dt.toISOString();
+      }
+
+      // Basit required kontrolü
+      if (!clientId || !transactionId || amount == null || !currency) {
+        console.warn("RevenueCat webhook missing required fields", { clientId, transactionId, amount, currency });
+        return res.status(400).json({ error: "bad_request", message: "missing clientId/transactionId/amount/currency from RevenueCat payload" });
+      }
+
+      // --- 2) provider map (store'a göre) ---
+      // Mevcut sistemde: 1=ios, 2=android, 3=web
+      let providerStr = "web";
+      if (store === "app_store" || store === "appstore" || store === "apple") providerStr = "ios";
+      if (store === "play_store" || store === "google_play" || store === "playstore") providerStr = "android";
+
+      const provMap = { ios: 1, android: 2, web: 3 };
+      const provVal = provMap[providerStr] ?? 3;
+
+      // --- 3) status map: event.type -> status ---
+      // Şimdilik sadece PURCHASE/RENEWAL/PRODUCT_CHANGE = completed; diğerlerini istersen genişletirsin
+      const stMap = {
+        PENDING: 0,
+        INITIAL_PURCHASE: 1,
+        RENEWAL: 1,
+        PRODUCT_CHANGE: 1,
+        // cancellation/expiration vb. için istersen 2-3 kullanırsın
+        CANCELLATION: 3,
+        EXPIRATION: 3,
+        BILLING_ISSUE: 0,
+      };
+
+      const stVal = stMap[rcEventType] ?? 1; // default completed
+
+      // Not: webhook recurring olduğu için sessionId yok, null geçiyoruz
+      const sessionId = null;
+
+      // İsteğe bağlı: product_id, entitlement vb. not’a yazılabilir
+      const note = event.product_id
+        ? `RC product_id=${event.product_id}; type=${rcEventType}`
+        : `RC event_type=${rcEventType}`;
+
+      // rawPayload olarak tüm payload’u sakla (JSONB)
+      const rawPayload = payload;
+
+      // --- 4) Aynı /payments insert mantığını kullan (idempotent) ---
+      const insertQ = `
+        INSERT INTO public.client_payment
+          (client_id, session_id, provider, transaction_id, amount, currency, status, paid_at, raw_payload, note)
+        VALUES
+          ($1,        $2,        $3,       $4,            $5,     $6,       $7,     COALESCE($8, NOW()),  $9,         $10)
+        ON CONFLICT (provider, transaction_id) DO UPDATE
+          SET client_id = EXCLUDED.client_id,
+              session_id = COALESCE(EXCLUDED.session_id, client_payment.session_id),
+              amount = EXCLUDED.amount,
+              currency = EXCLUDED.currency,
+              status = EXCLUDED.status,
+              paid_at = LEAST(client_payment.paid_at, EXCLUDED.paid_at),
+              raw_payload = COALESCE(EXCLUDED.raw_payload, client_payment.raw_payload),
+              note = COALESCE(EXCLUDED.note, client_payment.note)
+        RETURNING id, client_id AS "clientId", session_id AS "sessionId",
+                  provider, transaction_id AS "transactionId", amount, currency,
+                  status, paid_at AS "paidAt", created, note;
+      `;
+
+      const values = [
+        clientId,
+        sessionId,
+        provVal,
+        transactionId,
+        amount,
+        currency,
+        stVal,
+        paidAt,
+        JSON.stringify(rawPayload),
+        note,
+      ];
+
+      const { rows } = await db.query(insertQ, values);
+      const row = rows[0];
+
+      // RevenueCat webhook’larına genelde 200 + kısa bir body yeterli
+      return res.status(200).json({
+        ok: true,
+        paymentId: row.id,
+        clientId: row.clientId,
+        provider: row.provider,
+        status: row.status,
+        transactionId: row.transactionId,
+      });
+    } catch (err) {
+      console.error("revenuecat webhook error:", err);
+      return res.status(500).json({ error: "internal_error" });
+    } finally {
+      db.release();
+    }
+  }
+);
+
 // Swagger setup
 app.use(
   '/docs',
