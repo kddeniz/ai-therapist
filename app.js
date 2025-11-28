@@ -1933,11 +1933,29 @@ app.post("/webhooks/revenuecat",
   */
   async (req, res) => {
     const db = await pool.connect();
+    let rawLogId = null; // webhook_raw kaydının id'sini burada tutacağız
     try {
       const payload = req.body || {};
-      const event = payload.event || payload; // bazı config’lerde doğrudan root’ta olabilir
+
+      // 0) HER ZAMAN RAW WEBHOOK'U LOGLA
+      try {
+        const { rows: logRows } = await db.query(
+          `
+          INSERT INTO public.payment_webhook_raw (source, body)
+          VALUES ($1, $2)
+          RETURNING id
+          `,
+          ['revenuecat', payload]
+        );
+        rawLogId = logRows[0].id;
+      } catch (logErr) {
+        console.error("payment_webhook_raw insert error:", logErr);
+        // Burada hata olsa bile ana akışı bozmayalım; devam ediyoruz.
+      }
 
       // --- 1) Gerekli alanları çek ---
+      const event = payload.event || payload; // bazı config’lerde doğrudan root’ta olabilir
+
       const clientId = event.app_user_id;          // RevenueCat tarafında app_user_id = bizim clientId
       const transactionId = event.transaction_id;  // benzersiz transaction
       const rcEventType = String(event.type || "").toUpperCase();
@@ -1959,8 +1977,16 @@ app.post("/webhooks/revenuecat",
 
       // Basit required kontrolü
       if (!clientId || !transactionId || amount == null || !currency) {
-        console.warn("RevenueCat webhook missing required fields", { clientId, transactionId, amount, currency });
-        return res.status(400).json({ error: "bad_request", message: "missing clientId/transactionId/amount/currency from RevenueCat payload" });
+        console.warn("RevenueCat webhook missing required fields", {
+          clientId,
+          transactionId,
+          amount,
+          currency,
+        });
+        return res.status(400).json({
+          error: "bad_request",
+          message: "missing clientId/transactionId/amount/currency from RevenueCat payload",
+        });
       }
 
       // --- 2) provider map (store'a göre) ---
@@ -1973,13 +1999,11 @@ app.post("/webhooks/revenuecat",
       const provVal = provMap[providerStr] ?? 3;
 
       // --- 3) status map: event.type -> status ---
-      // Şimdilik sadece PURCHASE/RENEWAL/PRODUCT_CHANGE = completed; diğerlerini istersen genişletirsin
       const stMap = {
         PENDING: 0,
         INITIAL_PURCHASE: 1,
         RENEWAL: 1,
         PRODUCT_CHANGE: 1,
-        // cancellation/expiration vb. için istersen 2-3 kullanırsın
         CANCELLATION: 3,
         EXPIRATION: 3,
         BILLING_ISSUE: 0,
@@ -2005,14 +2029,14 @@ app.post("/webhooks/revenuecat",
         VALUES
           ($1,        $2,        $3,       $4,            $5,     $6,       $7,     COALESCE($8, NOW()),  $9,         $10)
         ON CONFLICT (provider, transaction_id) DO UPDATE
-          SET client_id = EXCLUDED.client_id,
-              session_id = COALESCE(EXCLUDED.session_id, client_payment.session_id),
-              amount = EXCLUDED.amount,
-              currency = EXCLUDED.currency,
-              status = EXCLUDED.status,
-              paid_at = LEAST(client_payment.paid_at, EXCLUDED.paid_at),
+          SET client_id   = EXCLUDED.client_id,
+              session_id  = COALESCE(EXCLUDED.session_id, client_payment.session_id),
+              amount      = EXCLUDED.amount,
+              currency    = EXCLUDED.currency,
+              status      = EXCLUDED.status,
+              paid_at     = LEAST(client_payment.paid_at, EXCLUDED.paid_at),
               raw_payload = COALESCE(EXCLUDED.raw_payload, client_payment.raw_payload),
-              note = COALESCE(EXCLUDED.note, client_payment.note)
+              note        = COALESCE(EXCLUDED.note, client_payment.note)
         RETURNING id, client_id AS "clientId", session_id AS "sessionId",
                   provider, transaction_id AS "transactionId", amount, currency,
                   status, paid_at AS "paidAt", created, note;
@@ -2034,6 +2058,14 @@ app.post("/webhooks/revenuecat",
       const { rows } = await db.query(insertQ, values);
       const row = rows[0];
 
+      // (Opsiyonel) processed flag'in varsa burada true yapabilirsin:
+      // if (rawLogId) {
+      //   await db.query(
+      //     `UPDATE public.payment_webhook_raw SET processed = TRUE WHERE id = $1`,
+      //     [rawLogId]
+      //   );
+      // }
+
       // RevenueCat webhook’larına genelde 200 + kısa bir body yeterli
       return res.status(200).json({
         ok: true,
@@ -2045,6 +2077,17 @@ app.post("/webhooks/revenuecat",
       });
     } catch (err) {
       console.error("revenuecat webhook error:", err);
+      // Hata durumunda error kolonun varsa oraya yazmayı dene (yoksa bu da sessizce düşecek)
+      if (rawLogId) {
+        try {
+          await db.query(
+            `UPDATE public.payment_webhook_raw SET error = $2 WHERE id = $1`,
+            [rawLogId, String(err.message || err)]
+          );
+        } catch (e2) {
+          console.error("update payment_webhook_raw.error failed:", e2);
+        }
+      }
       return res.status(500).json({ error: "internal_error" });
     } finally {
       db.release();
