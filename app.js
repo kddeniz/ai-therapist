@@ -2095,6 +2095,295 @@ app.post("/webhooks/revenuecat",
   }
 );
 
+// /analytics — tek endpoint, tek HTML (SSR + embedded JSON)
+app.get("/analytics",
+  /*
+    #swagger.tags = ['Admin', 'Analytics']
+    #swagger.summary = 'Basit analytics dashboard (tek HTML).'
+    #swagger.parameters['days'] = { in: 'query', required: false, type: 'integer', default: 30, description: 'Kaç gün geriye bakılsın (max 180)' }
+    #swagger.responses[200] = { description: 'HTML' }
+  */
+  async (req, res) => {
+    const db = await pool.connect();
+    try {
+      const days = Math.min(Math.max(parseInt(String(req.query.days || "30"), 10) || 30, 7), 180);
+
+      // ---- Günlük yeni client ----
+      const qNewClients = `
+        WITH days AS (
+          SELECT generate_series(
+            date_trunc('day', NOW()) - (($1::int - 1) || ' days')::interval,
+            date_trunc('day', NOW()),
+            interval '1 day'
+          ) AS day
+        )
+        SELECT
+          to_char(d.day, 'YYYY-MM-DD') AS day,
+          COALESCE(COUNT(c.id), 0)::int AS value
+        FROM days d
+        LEFT JOIN public.client c
+          ON date_trunc('day', c.created) = d.day
+        GROUP BY d.day
+        ORDER BY d.day ASC;
+      `;
+
+      // ---- Günlük yeni session ----
+      const qNewSessions = `
+        WITH days AS (
+          SELECT generate_series(
+            date_trunc('day', NOW()) - (($1::int - 1) || ' days')::interval,
+            date_trunc('day', NOW()),
+            interval '1 day'
+          ) AS day
+        )
+        SELECT
+          to_char(d.day, 'YYYY-MM-DD') AS day,
+          COALESCE(COUNT(s.id), 0)::int AS value
+        FROM days d
+        LEFT JOIN public.session s
+          ON date_trunc('day', s.created) = d.day
+          AND (s.deleted IS NULL OR s.deleted = FALSE)   -- deleted kolonun yoksa bu satırı sil
+        GROUP BY d.day
+        ORDER BY d.day ASC;
+      `;
+
+      // ---- Günlük ended session (opsiyonel; ended kolonun yoksa komple kaldır) ----
+      const qEndedSessions = `
+        WITH days AS (
+          SELECT generate_series(
+            date_trunc('day', NOW()) - (($1::int - 1) || ' days')::interval,
+            date_trunc('day', NOW()),
+            interval '1 day'
+          ) AS day
+        )
+        SELECT
+          to_char(d.day, 'YYYY-MM-DD') AS day,
+          COALESCE(COUNT(s.id), 0)::int AS value
+        FROM days d
+        LEFT JOIN public.session s
+          ON s.ended IS NOT NULL
+          AND date_trunc('day', s.ended) = d.day
+          AND (s.deleted IS NULL OR s.deleted = FALSE)   -- deleted kolonun yoksa bu satırı sil
+        GROUP BY d.day
+        ORDER BY d.day ASC;
+      `;
+
+      const [rClients, rSessions, rEnded] = await Promise.all([
+        db.query(qNewClients, [days]),
+        db.query(qNewSessions, [days]),
+        db.query(qEndedSessions, [days]),
+      ]);
+
+      const dailyNewClients = rClients.rows || [];
+      const dailyNewSessions = rSessions.rows || [];
+      const dailyEndedSessions = rEnded.rows || [];
+
+      const sum = (arr) => arr.reduce((a, b) => a + (Number(b.value) || 0), 0);
+      const totals = {
+        newClients: sum(dailyNewClients),
+        newSessions: sum(dailyNewSessions),
+        endedSessions: sum(dailyEndedSessions),
+      };
+
+      // ---- HTML ----
+      const html = `<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NumaMind Analytics</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b1020; color:#e7efff; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 18px; }
+    .top { display:flex; gap:12px; align-items:flex-end; justify-content:space-between; flex-wrap:wrap; }
+    .title { font-size: 18px; font-weight: 650; }
+    .sub { color:#8fa3d1; font-size:12px; }
+    .cards { display:flex; gap:10px; flex-wrap:wrap; margin-top: 12px; }
+    .card { background: rgba(255,255,255,0.04); border: 1px solid rgba(143,163,209,0.18); border-radius: 14px; padding: 10px 12px; min-width: 180px; }
+    .card .k { color:#8fa3d1; font-size:12px; }
+    .card .v { font-size: 20px; font-weight: 700; margin-top: 2px; }
+    .grid { display:grid; grid-template-columns: 1fr; gap: 12px; margin-top: 14px; }
+    @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+    .panel { background: rgba(255,255,255,0.04); border: 1px solid rgba(143,163,209,0.18); border-radius: 16px; padding: 10px; }
+    canvas { width: 100%; height: 260px; display:block; }
+    .note { color:#8fa3d1; font-size:12px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <div class="title">Analytics</div>
+        <div class="sub">Son ${days} gün • ${new Date().toISOString().slice(0, 10)}</div>
+      </div>
+      <div class="sub">/analytics?days=30 (max 180)</div>
+    </div>
+
+    <div class="cards">
+      <div class="card"><div class="k">Yeni client</div><div class="v">${totals.newClients}</div></div>
+      <div class="card"><div class="k">Yeni session</div><div class="v">${totals.newSessions}</div></div>
+      <div class="card"><div class="k">Ended session</div><div class="v">${totals.endedSessions}</div></div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <canvas id="c1" width="520" height="260"></canvas>
+      </div>
+      <div class="panel">
+        <canvas id="c2" width="520" height="260"></canvas>
+      </div>
+      <div class="panel">
+        <canvas id="c3" width="520" height="260"></canvas>
+      </div>
+    </div>
+
+    <div class="note">
+      İpucu: Gün etiketleri MM-DD formatında gösterilir. Çok gün olursa otomatik seyrekleştirilir.
+    </div>
+  </div>
+
+<script>
+  // Server’dan gelen veri
+  const dailyNewClients = ${JSON.stringify(dailyNewClients)};
+  const dailyNewSessions = ${JSON.stringify(dailyNewSessions)};
+  const dailyEndedSessions = ${JSON.stringify(dailyEndedSessions)};
+
+  function drawLineChart(canvas, series, opts = {}) {
+    const title = opts.title || "";
+    const valueKey = opts.valueKey || "value";
+    const padding = opts.padding ?? 32;
+
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width;
+    const H = canvas.height;
+
+    // Clear
+    ctx.clearRect(0, 0, W, H);
+
+    // Title
+    if (title) {
+      ctx.fillStyle = "#e7efff";
+      ctx.font = "14px system-ui";
+      ctx.textAlign = "left";
+      ctx.fillText(title, 12, 18);
+    }
+
+    // Empty
+    if (!Array.isArray(series) || series.length === 0) {
+      ctx.fillStyle = "#8fa3d1";
+      ctx.font = "12px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText("No data", W / 2, H / 2);
+      return;
+    }
+
+    const values = series.map(d => Number(d?.[valueKey] ?? 0));
+    const labels = series.map(d => String(d?.day ?? ""));
+
+    let minV = Math.min(...values);
+    let maxV = Math.max(...values);
+    if (!Number.isFinite(minV)) minV = 0;
+    if (!Number.isFinite(maxV)) maxV = 1;
+    if (minV === maxV) { minV -= 1; maxV += 1; }
+
+    const plotLeft = padding;
+    const plotRight = W - padding;
+    const plotTop = 28;
+    const plotBottom = H - 22;
+
+    const n = values.length;
+
+    const xs = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const t = n === 1 ? 0 : i / (n - 1);
+      xs[i] = plotLeft + t * (plotRight - plotLeft);
+    }
+
+    const ys = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const v = values[i];
+      const t = (v - minV) / (maxV - minV);
+      ys[i] = plotBottom - t * (plotBottom - plotTop);
+    }
+
+    // Grid
+    const gridLines = 4;
+    ctx.strokeStyle = "rgba(143,163,209,0.18)";
+    ctx.lineWidth = 1;
+    for (let g = 0; g <= gridLines; g++) {
+      const ty = plotTop + (g / gridLines) * (plotBottom - plotTop);
+      ctx.beginPath();
+      ctx.moveTo(plotLeft, ty);
+      ctx.lineTo(plotRight, ty);
+      ctx.stroke();
+    }
+
+    // Y labels
+    ctx.fillStyle = "#8fa3d1";
+    ctx.font = "11px system-ui";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (let g = 0; g <= gridLines; g++) {
+      const t = 1 - g / gridLines;
+      const v = minV + t * (maxV - minV);
+      const ty = plotTop + (g / gridLines) * (plotBottom - plotTop);
+      ctx.fillText(Math.round(v).toString(), plotLeft - 6, ty);
+    }
+
+    // X labels (days)
+    const step = labels.length > 21 ? 5 : labels.length > 10 ? 2 : 1;
+    ctx.fillStyle = "#8fa3d1";
+    ctx.font = "11px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    for (let i = 0; i < labels.length; i++) {
+      if (i % step !== 0 && i !== labels.length - 1) continue;
+      const lbl = labels[i] || "";
+      const short = lbl.length >= 10 ? lbl.slice(5) : lbl; // MM-DD
+      ctx.fillText(short, xs[i], H - 8);
+    }
+
+    // Line
+    ctx.strokeStyle = "#b7c6ff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(xs[0], ys[0]);
+    for (let i = 1; i < n; i++) ctx.lineTo(xs[i], ys[i]);
+    ctx.stroke();
+
+    // Points
+    ctx.fillStyle = "#e7efff";
+    for (let i = 0; i < n; i++) {
+      ctx.beginPath();
+      ctx.arc(xs[i], ys[i], 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Border
+    ctx.strokeStyle = "rgba(143,163,209,0.22)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(plotLeft, plotTop, plotRight - plotLeft, plotBottom - plotTop);
+  }
+
+  drawLineChart(document.getElementById("c1"), dailyNewClients, { title: "Günlük Yeni Client" });
+  drawLineChart(document.getElementById("c2"), dailyNewSessions, { title: "Günlük Yeni Session" });
+  drawLineChart(document.getElementById("c3"), dailyEndedSessions, { title: "Günlük Ended Session" });
+</script>
+</body>
+</html>`;
+
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.status(200).send(html);
+    } catch (err) {
+      console.error("analytics error:", err);
+      return res.status(500).json({ error: "internal_error" });
+    } finally {
+      db.release();
+    }
+  }
+);
+
 // Swagger setup
 app.use(
   '/docs',

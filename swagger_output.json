@@ -1064,6 +1064,50 @@
           }
         }
       }
+    },
+    "/analytics": {
+      "get": {
+        "tags": [
+          "Admin",
+          "Analytics"
+        ],
+        "summary": "Basit analytics dashboard (tek HTML).",
+        "description": "",
+        "produces": [
+          "text/html; charset=utf-8"
+        ],
+        "parameters": [
+          {
+            "name": "origin",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "access-control-request-headers",
+            "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "default": 30,
+            "description": "Kaç gün geriye bakılsın (max 180)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
     }
   }
 }
