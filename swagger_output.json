@@ -120,9 +120,6 @@
           "204": {
             "description": "No Content"
           },
-          "400": {
-            "description": "Bad Request"
-          },
           "500": {
             "description": "Internal Server Error"
           }
@@ -374,18 +371,6 @@
             "type": "string",
             "required": false,
             "default": "tr"
-          },
-          {
-            "name": "body",
-            "in": "body",
-            "schema": {
-              "type": "object",
-              "properties": {
-                "language": {
-                  "example": "any"
-                }
-              }
-            }
           }
         ],
         "responses": {
