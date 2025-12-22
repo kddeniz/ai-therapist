@@ -125,17 +125,30 @@ app.get('/', (req, res) => {
 
 app.post("/clients", async (req, res) => {
   try {
-    const { clientId, username, gender, language } = req.body;
-
-    // basit validasyon
-    if (!username || !language || gender === undefined) {
-      return res.status(400).json({ error: "username, gender ve language gerekli" });
-    }
+    const { clientId, username, gender, language } = req.body || {};
 
     // 1) clientId gönderilmişse onu kullan, yoksa yeni uuid üret
-    const id = clientId && String(clientId).trim() !== "" ? clientId : uuidv4();
+    const id = clientId && String(clientId).trim() !== "" ? String(clientId).trim() : uuidv4();
 
-    // 2) Bu ID var mı?
+    // 2) Default'lar
+    const normalizedLanguage =
+      language && String(language).trim() !== "" ? String(language).trim().toLowerCase() : "tr";
+
+    // gender db'de int gibi: 1=male, 2=female, else=don't want to disclose
+    // default: 0
+    let normalizedGender = 0;
+    if (gender !== undefined && gender !== null && String(gender).trim() !== "") {
+      const g = Number(gender);
+      normalizedGender = [0, 1, 2].includes(g) ? g : 0;
+    }
+
+    const makeAutoUsername = () =>
+      `auto-${Math.floor(10000000 + Math.random() * 90000000)}`; // 8 digit
+
+    const normalizedUsername =
+      username && String(username).trim() !== "" ? String(username).trim() : makeAutoUsername();
+
+    // 3) Bu ID var mı?
     const existing = await pool.query(
       `SELECT id FROM client WHERE id = $1 LIMIT 1`,
       [id]
@@ -154,24 +167,43 @@ app.post("/clients", async (req, res) => {
         WHERE id = $1
         RETURNING id
         `,
-        [id, username, gender, language]
+        [id, normalizedUsername, normalizedGender, normalizedLanguage]
       );
       result = upd.rows[0];
     } else {
       // --- INSERT yeni client ---
-      const ins = await pool.query(
-        `
-        INSERT INTO client (id, username, gender, language)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id
-        `,
-        [id, username, gender, language]
-      );
-      result = ins.rows[0];
+      // username unique ise çok düşük ihtimal çakışabilir → 3 deneme
+      let inserted = null;
+      let lastErr = null;
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const u = attempt === 0 ? normalizedUsername : makeAutoUsername();
+        try {
+          const ins = await pool.query(
+            `
+            INSERT INTO client (id, username, gender, language)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+            `,
+            [id, u, normalizedGender, normalizedLanguage]
+          );
+          inserted = ins.rows[0];
+          break;
+        } catch (e) {
+          lastErr = e;
+          // olası username unique violation’da retry, diğerlerinde throw
+          const isUnique =
+            e?.code === "23505" ||
+            /duplicate key value violates unique constraint/i.test(String(e?.message || ""));
+          if (!isUnique) throw e;
+        }
+      }
+
+      if (!inserted) throw lastErr || new Error("insert_failed");
+      result = inserted;
     }
 
     return res.status(201).json({ id: result.id });
-
   } catch (err) {
     console.error("createClient error:", err);
     res.status(500).json({ error: "internal_error" });
