@@ -232,16 +232,34 @@ app.get("/clients",
   }
 );
 
+//yeni seans
 app.post("/sessions", async (req, res) => {
   const client = await pool.connect();
   try {
     const { clientId, therapistId } = req.body;
 
+    // NEW (backward compatible): therapyIntent + language
+    const allowedIntents = new Set(["kaygi", "zihin", "deneme", "sohbet"]);
+    const therapyIntentRaw = req.body?.therapyIntent;
+    const languageRaw = req.body?.language;
+
+    const effectiveTherapyIntent = String(therapyIntentRaw || "sohbet").toLowerCase().trim();
+    const effectiveLanguage = String(languageRaw || "tr").toLowerCase().trim() || "tr";
+
+    // İstiyorsan strict yap: intent gelmiş ama yanlışsa 400.
+    // Gelmemişse default zaten "sohbet".
+    if (therapyIntentRaw != null && !allowedIntents.has(effectiveTherapyIntent)) {
+      return res.status(400).json({
+        error: "bad_request",
+        message: "therapyIntent kaygi|zihin|deneme|sohbet olmalı",
+      });
+    }
+
     if (!clientId || !therapistId) {
       return res.status(400).json({ error: "clientId ve therapistId zorunlu" });
     }
 
-    // NEW: client username'i al ve bypass bayrağını hesapla
+    // client username'i al ve bypass bayrağını hesapla
     const { rows: cRows } = await client.query(
       `SELECT username FROM public.client WHERE id = $1 LIMIT 1`,
       [clientId]
@@ -250,11 +268,11 @@ app.post("/sessions", async (req, res) => {
       return res.status(404).json({ error: "client_not_found" });
     }
 
-    const uname = String(cRows[0].username || "").toLowerCase();    // NEW
-    const skipPaywall = uname === SKIP_PAYWALL_USER;               // (mevcut satırı buna çevir)
-    const forcePaywall = uname === FORCE_PAYWALL_USER;              // NEW
+    const uname = String(cRows[0].username || "").toLowerCase();
+    const skipPaywall = uname === SKIP_PAYWALL_USER;
+    const forcePaywall = uname === FORCE_PAYWALL_USER;
 
-    // 0) Mevcut main_session var mı? Varsa created'ını al.
+    // 0) Mevcut main_session var mı?
     const msExistQ = `
       SELECT id, created
       FROM public.main_session
@@ -265,53 +283,45 @@ app.post("/sessions", async (req, res) => {
 
     let inFreeTrial = false;
     if (msExist.length === 0) {
-      // Hiç main_session yok -> ilk seans oluşturulacak -> trial başlat
       inFreeTrial = true;
     } else {
-      // main_session var -> 7 gün içinde mi?
       const msCreated = new Date(msExist[0].created);
       const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
       inFreeTrial = msCreated >= sevenDaysAgo;
     }
 
     if (forcePaywall) {
-      inFreeTrial = false;  // NEW: reviewer için ilk seansta bile paywall aktif
+      inFreeTrial = false;
     }
 
-    // 1) ÖDEME KONTROLÜ (yalnızca trial DEĞİLSE ve bypass YOKSA ödeme kontrolü yap)
+    // 1) ÖDEME KONTROLÜ (trial değilse, bypass yoksa)
     if (!inFreeTrial && !skipPaywall) {
       const payQ = `
-    SELECT 1
-    FROM public.client_payment
-    WHERE client_id = $1
-      AND status = 1                 -- 1: completed
-      AND (
-        -- RevenueCat payload'ı varsa: expiresDate / latestExpirationDate'e göre karar ver
-        (
-          raw_payload IS NOT NULL
-          AND COALESCE(
-                NULLIF(
-                  (raw_payload::jsonb -> 'subscription'  ->> 'expiresDate'),
-                  ''
-                ),
-                (raw_payload::jsonb -> 'customerInfo' ->> 'latestExpirationDate')
-              )::timestamptz >= NOW()
-        )
-        -- Eski / manuel ödemeler veya payload olmayan kayıtlar için eski fallback:
-        OR (
-          raw_payload IS NULL
-          AND paid_at >= NOW() - INTERVAL '32 days'
-        )
-      )
-    LIMIT 1
-  `;
-
+        SELECT 1
+        FROM public.client_payment
+        WHERE client_id = $1
+          AND status = 1
+          AND (
+            (
+              raw_payload IS NOT NULL
+              AND COALESCE(
+                    NULLIF((raw_payload::jsonb -> 'subscription'  ->> 'expiresDate'), ''),
+                    (raw_payload::jsonb -> 'customerInfo' ->> 'latestExpirationDate')
+                  )::timestamptz >= NOW()
+            )
+            OR (
+              raw_payload IS NULL
+              AND paid_at >= NOW() - INTERVAL '32 days'
+            )
+          )
+        LIMIT 1
+      `;
       const payOk = await client.query(payQ, [clientId]);
       if (payOk.rowCount === 0) {
         return res.status(402).json({
           error: "payment_required",
           message:
-            "Aboneliğin aktif görünmüyor. Lütfen devam etmek için ödeme yap veya aboneliğini yenile."
+            "Aboneliğin aktif görünmüyor. Lütfen devam etmek için ödeme yap veya aboneliğini yenile.",
         });
       }
     }
@@ -319,18 +329,15 @@ app.post("/sessions", async (req, res) => {
     // 2) ANA OTURUM & SIRA NUMARASI (transaction içinde)
     await client.query("BEGIN");
 
-    // Ana oturumu al/oluştur (ilk seanssa burada oluşturulacak ve trial başlangıcı damgalanacak)
     const msQ = `SELECT public.get_or_create_main_session($1) AS main_session_id`;
     const { rows: msRows } = await client.query(msQ, [clientId]);
     const mainSessionId = msRows[0]?.main_session_id;
     if (!mainSessionId) throw new Error("main_session_not_found");
 
-    // Sıradaki seans numarası
     const numQ = `SELECT public.next_session_number($1) AS next_no`;
     const { rows: noRows } = await client.query(numQ, [mainSessionId]);
     let sessionNumber = noRows[0]?.next_no || 1;
 
-    // 3) SEANSI OLUŞTUR (unique çakışmaya karşı bir deneme daha)
     const insertSession = async (number) => {
       const insQ = `
         INSERT INTO public."session"(client_id, therapist_id, main_session_id, "number")
@@ -345,26 +352,184 @@ app.post("/sessions", async (req, res) => {
       ({ rows } = await insertSession(sessionNumber));
     } catch (e) {
       const isUnique =
-        (e.code === "23505") ||
+        e.code === "23505" ||
         /duplicate key value violates unique constraint/i.test(String(e?.message || ""));
       if (!isUnique) throw e;
 
       const { rows: noRows2 } = await client.query(numQ, [mainSessionId]);
-      sessionNumber = noRows2[0]?.next_no || (sessionNumber + 1);
+      sessionNumber = noRows2[0]?.next_no || sessionNumber + 1;
       ({ rows } = await insertSession(sessionNumber));
     }
 
     await client.query("COMMIT");
 
+    const createdSession = rows[0];
+    const isFirstSession = Number(createdSession.number) === 1;
+
+    // trial days_left (eski mantıkla uyumlu)
+    const trialObj = inFreeTrial
+      ? {
+        active: true,
+        days_left:
+          7 -
+          Math.floor(
+            (Date.now() -
+              (msExist[0]?.created ? new Date(msExist[0].created) : new Date())) /
+            (24 * 60 * 60 * 1000)
+          ),
+      }
+      : { active: false };
+
+    // Base response: eski alanlar korunuyor
+    const baseResponse = {
+      id: createdSession.id,
+      created: createdSession.created,
+      number: createdSession.number,
+      mainSessionId: createdSession.main_session_id,
+      trial: trialObj,
+      // NEW extras (backward compatible)
+      effectiveLanguage,
+      effectiveTherapyIntent,
+    };
+
+    // 3A) İlk seans: intro url döndür
+    if (isFirstSession) {
+      const introUrl = `https://ai-therapist-bsts.onrender.com/static/voices/intro/${encodeURIComponent(
+        effectiveLanguage
+      )}/${encodeURIComponent(effectiveTherapyIntent)}/${encodeURIComponent(therapistId)}.mp3`;
+
+      return res.status(201).json({
+        ...baseResponse,
+        introUrl,
+        openingText: null,
+        openingAudioBase64: null,
+        openingAudioMime: null,
+      });
+    }
+
+    // 3B) İlk seans değil: geçmiş özetlere göre açılış cümlesi + TTS
+    let openingText =
+      effectiveLanguage === "tr"
+        ? "En son kaldığımız yerden devam etmek ister misin, yoksa bugün farklı bir konuya mı geçmek istersin?"
+        : "Would you like to continue from where we left off, or switch to a different topic today?";
+
+    let openingAudioBase64 = null;
+    let openingAudioMime = null;
+
+    try {
+      // therapist voiceId çek
+      const { rows: tRows } = await client.query(
+        `SELECT voice_id AS "voiceId" FROM public.therapist WHERE id = $1 LIMIT 1`,
+        [therapistId]
+      );
+      const voiceId = tRows[0]?.voiceId;
+
+      // geçmiş özetler (son 6 seans)
+      const { rows: summaryRows } = await client.query(
+        `
+        SELECT "number", summary, created
+        FROM session
+        WHERE main_session_id = $1
+          AND "number" < $2
+          AND summary IS NOT NULL
+        ORDER BY "number" DESC
+        LIMIT 6
+        `,
+        [createdSession.main_session_id, createdSession.number]
+      );
+
+      const clamp = (s, n) => (!s ? "" : s.length <= n ? s : s.slice(0, n).trim() + "…");
+      const pastBlock =
+        summaryRows.length === 0
+          ? "PAST_SESSIONS_SUMMARIES: none."
+          : [
+            "PAST_SESSIONS_SUMMARIES (most recent first):",
+            ...summaryRows.map(
+              (r) => `#${r.number} (${new Date(r.created).toISOString()}): ${clamp(r.summary, 450)}`
+            ),
+          ].join("\n");
+
+      // OpenAI ile spoken opening
+      const sys = `
+You are a voice-first coaching assistant.
+Output MUST be in ${effectiveLanguage}.
+Write ONLY what will be spoken (no tags, no markers, no metadata).
+Be warm, concise (1-3 short sentences). Ask at most ONE question.
+Do NOT say: "summary", "session number", "metadata", or any internal wording.
+Use ONLY the information in PAST_SESSIONS_SUMMARIES. If none, use a generic continuation question.
+`;
+
+      const userPrompt = `
+${pastBlock}
+
+TASK:
+Create a short spoken opening that:
+- briefly references the last concrete topic (only if clearly present),
+- then asks whether to continue from there or switch topics,
+- keep it natural, non-clinical, and supportive.
+`;
+
+      const aiResp = await fetch(OPENAI_API_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: OPENAI_MODEL,
+          temperature: 0.2,
+          top_p: 0.9,
+          messages: [
+            { role: "system", content: sys },
+            { role: "user", content: userPrompt },
+          ],
+        }),
+      });
+
+      if (aiResp.ok) {
+        const aiJson = await aiResp.json();
+        const txt = aiJson.choices?.[0]?.message?.content?.trim();
+        if (txt) openingText = txt;
+      }
+
+      // Eleven TTS
+      if (voiceId) {
+        const ttsResp = await fetch(`${ELEVEN_TTS_URL}/${encodeURIComponent(voiceId)}`, {
+          method: "POST",
+          headers: {
+            "xi-api-key": process.env.ELEVEN_API_KEY,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: openingText,
+            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+            model_id: "eleven_flash_v2_5",
+            output_format: "mp3_22050_32",
+          }),
+        });
+
+        if (ttsResp.ok) {
+          const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
+          openingAudioBase64 = audioBuffer.toString("base64");
+          openingAudioMime = "audio/mpeg";
+        }
+      }
+    } catch (e) {
+      console.warn("opening generation failed:", String(e?.message || e));
+      // fallback ile devam
+    }
+
     return res.status(201).json({
-      id: rows[0].id,
-      created: rows[0].created,
-      number: rows[0].number,
-      mainSessionId: rows[0].main_session_id,
-      trial: inFreeTrial ? { active: true, days_left: 7 - Math.floor((Date.now() - (msExist[0]?.created ? new Date(msExist[0].created) : new Date())) / (24 * 60 * 60 * 1000)) } : { active: false }
+      ...baseResponse,
+      introUrl: null,
+      openingText,
+      openingAudioBase64,
+      openingAudioMime,
     });
   } catch (err) {
-    try { await client.query("ROLLBACK"); } catch { }
+    try {
+      await client.query("ROLLBACK");
+    } catch { }
     console.error("createSession error:", err);
     return res.status(500).json({ error: "internal_error" });
   } finally {
