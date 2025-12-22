@@ -34,6 +34,7 @@ const ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech";
 //const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // bir voice id/ismi
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"; // Responses API kullanıyorsanız onu koyun
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const CDN_BASE_URL = "https://numamind.b-cdn.net/voices";
 
 const DEFAULT_LANGUAGE = "tr";
 const LANGUAGE_TEXTS = {
@@ -588,9 +589,9 @@ app.post("/sessions", async (req, res) => {
 
     // 3A) İlk seans: intro url döndür
     if (isFirstSession) {
-      const introUrl = `https://ai-therapist-bsts.onrender.com/static/voices/intro/${encodeURIComponent(
-        effectiveLanguage
-      )}/${encodeURIComponent(effectiveTherapyIntent)}/${encodeURIComponent(therapistId)}.mp3`;
+    const introUrl = `${CDN_BASE_URL}/intro/${encodeURIComponent(effectiveLanguage)}/${encodeURIComponent(
+      effectiveTherapyIntent
+    )}/${encodeURIComponent(therapistId)}.mp3`;
 
       return res.status(201).json({
         ...baseResponse,
@@ -1776,7 +1777,7 @@ app.get("/therapists/:therapistId/voice-preview",
 
       const { rows } = await pool.query(
         `
-        SELECT id, audio_preview_url
+        SELECT id
         FROM public.therapist
         WHERE id = $1
         LIMIT 1
@@ -1788,16 +1789,14 @@ app.get("/therapists/:therapistId/voice-preview",
         return res.status(404).json({ error: "therapist_not_found" });
       }
 
-      const t = rows[0];
-
-      if (!t.audio_preview_url) {
-        // terapist var ama ses örneği yok
-        return res.status(404).json({ error: "voice_preview_not_found" });
-      }
+      const langParam = determineLanguage([req.query.language]);
+      const previewUrl = `${CDN_BASE_URL}/preview/${encodeURIComponent(langParam)}/${encodeURIComponent(
+        therapistId
+      )}.mp3`;
 
       return res.status(200).json({
-        therapistId: t.id,
-        audioUrl: t.audio_preview_url,
+        therapistId,
+        audioUrl: previewUrl,
       });
     } catch (err) {
       console.error("get therapist voice preview error:", err);
