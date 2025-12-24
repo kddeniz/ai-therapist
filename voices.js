@@ -45,16 +45,27 @@ function loadVoiceTexts() {
     throw new Error(`Missing ${VOICES_TXT}`);
   }
   const raw = fs.readFileSync(VOICES_TXT, "utf8");
-  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const lines = raw.split(/\r?\n/);
   const data = {};
-  for (const line of lines) {
-    const [key, ...rest] = line.split(":");
-    if (!key || rest.length === 0) continue;
-    const value = rest.join(":").trim();
+  for (let line of lines) {
+    line = line.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const colonIndex = line.indexOf(":");
+    if (colonIndex === -1) continue;
+
+    const key = line.slice(0, colonIndex).trim();
+    let value = line.slice(colonIndex + 1).trim();
+    if (!key || value === "") continue;
+
     if (key === "languages") {
-      data.languages = value.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+      value = value.split("#")[0].trim();
+      data.languages = value
+        .split(",")
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean);
     } else {
-      data[key.trim()] = value;
+      data[key] = value.split("#")[0].trim();
     }
   }
   if (!data.languages || data.languages.length === 0) {

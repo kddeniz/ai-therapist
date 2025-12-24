@@ -624,6 +624,7 @@ app.post("/sessions", async (req, res) => {
         WHERE main_session_id = $1
           AND "number" < $2
           AND summary IS NOT NULL
+          AND (deleted IS NULL OR deleted = FALSE)
         ORDER BY "number" DESC
         LIMIT 6
         `,
@@ -1517,6 +1518,7 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
         WHERE main_session_id = $1
           AND "number" < $2
           AND summary IS NOT NULL
+          AND (deleted IS NULL OR deleted = FALSE)
         ORDER BY "number" ASC
         LIMIT 12
         `,
