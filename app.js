@@ -70,6 +70,22 @@ const LANGUAGE_TEXTS = {
     openingFallback:
       "Would you like to continue from where we left off or switch to a different topic today?"
   },
+  jp: {
+    fallbackUtterances: [
+      "うまく聞き取れませんでした。もう一度言ってもらえますか？",
+      "音声が検出されませんでした。もう一度試してみてください。"
+    ],
+    minimalSummary: {
+      publicTitle: "# セッション要約",
+      publicLine:
+        "- 今回のセッションでは新しい内容は共有されませんでした。準備ができたら、前回の続きから再開できます。",
+      homeworkTitle: "# 宿題",
+      homeworkLine: "なし",
+      coachLine: "- 今回のセッションでは新しいデータは収集されませんでした。"
+    },
+    openingFallback:
+      "前回の続きから始めますか？それとも今日は別の話題にしますか？"
+  },
   de: {
     fallbackUtterances: [
       "Ich habe dich nicht verstanden. Kannst du es nochmal sagen?",
@@ -589,9 +605,9 @@ app.post("/sessions", async (req, res) => {
 
     // 3A) İlk seans: intro url döndür
     if (isFirstSession) {
-    const introUrl = `${CDN_BASE_URL}/intro/${encodeURIComponent(effectiveLanguage)}/${encodeURIComponent(
-      effectiveTherapyIntent
-    )}/${encodeURIComponent(therapistId)}.mp3`;
+      const introUrl = `${CDN_BASE_URL}/intro/${encodeURIComponent(effectiveLanguage)}/${encodeURIComponent(
+        effectiveTherapyIntent
+      )}/${encodeURIComponent(therapistId)}.mp3`;
 
       return res.status(201).json({
         ...baseResponse,

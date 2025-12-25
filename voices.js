@@ -26,6 +26,7 @@ const LANGUAGE_DISPLAY_NAMES = {
   it: "Italian",
   nl: "Dutch",
   sv: "Swedish",
+  jp: "Japanese"
 };
 
 const INTENTS = ["kaygi", "zihin", "deneme", "sohbet"];
