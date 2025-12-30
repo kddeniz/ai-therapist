@@ -36,6 +36,100 @@ const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"; // Response
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const CDN_BASE_URL = "https://numamind.b-cdn.net/voices";
 
+// API Cost Tracking - Pricing Configuration
+// Note: Update these prices according to current API documentation
+const OPENAI_PRICING = {
+  'gpt-4o-mini': {
+    input: 0.15 / 1_000_000,  // $0.15 per 1M input tokens
+    output: 0.60 / 1_000_000  // $0.60 per 1M output tokens
+  },
+  // Add other models as needed
+};
+
+const ELEVENLABS_PRICING = {
+  tts: {
+    'eleven_flash_v2_5': 0.18 / 1000, // $0.18 per 1K characters (verify current pricing)
+  },
+  stt: {
+    'scribe_v1': 0.30 / 60, // $0.30 per minute (verify current pricing)
+  }
+};
+
+// Cost calculation functions
+function calculateOpenAICost(model, inputTokens, outputTokens) {
+  const pricing = OPENAI_PRICING[model];
+  if (!pricing) return 0;
+  return (inputTokens * pricing.input) + (outputTokens * pricing.output);
+}
+
+function calculateElevenLabsTTSCost(model, characterCount) {
+  const pricing = ELEVENLABS_PRICING.tts[model];
+  if (!pricing) return 0;
+  return characterCount * pricing;
+}
+
+function calculateElevenLabsSTTCost(model, durationSeconds) {
+  const pricing = ELEVENLABS_PRICING.stt[model];
+  if (!pricing) return 0;
+  return (durationSeconds / 60) * pricing;
+}
+
+// Log API cost to database
+async function logAPICost(db, {
+  clientId,
+  sessionId,
+  messageId = null,
+  provider,
+  serviceType,
+  model,
+  inputTokens = null,
+  outputTokens = null,
+  characters = null,
+  audioDurationSeconds = null,
+  metadata = null
+}) {
+  let cost = 0;
+  
+  if (provider === 'openai') {
+    cost = calculateOpenAICost(model, inputTokens || 0, outputTokens || 0);
+  } else if (provider === 'elevenlabs') {
+    if (serviceType === 'tts') {
+      cost = calculateElevenLabsTTSCost(model, characters || 0);
+    } else if (serviceType === 'stt') {
+      cost = calculateElevenLabsSTTCost(model, audioDurationSeconds || 0);
+    }
+  }
+  
+  try {
+    await db.query(
+      `
+      INSERT INTO public.api_cost_log
+        (client_id, session_id, message_id, provider, service_type, model,
+         input_tokens, output_tokens, characters, audio_duration_seconds,
+         cost_usd, metadata)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `,
+      [
+        clientId,
+        sessionId,
+        messageId,
+        provider,
+        serviceType,
+        model,
+        inputTokens,
+        outputTokens,
+        characters,
+        audioDurationSeconds,
+        cost,
+        metadata ? JSON.stringify(metadata) : null
+      ]
+    );
+  } catch (err) {
+    // Log error but don't fail the request
+    console.error("Failed to log API cost:", err);
+  }
+}
+
 const DEFAULT_LANGUAGE = "tr";
 const LANGUAGE_TEXTS = {
   tr: {
@@ -700,6 +794,19 @@ Create a short spoken opening that:
         const aiJson = await aiResp.json();
         const txt = aiJson.choices?.[0]?.message?.content?.trim();
         if (txt) openingText = txt;
+        
+        // Log OpenAI cost
+        const usage = aiJson.usage || {};
+        await logAPICost(client, {
+          clientId,
+          sessionId: createdSession.id,
+          provider: 'openai',
+          serviceType: 'opening_generation',
+          model: OPENAI_MODEL,
+          inputTokens: usage.prompt_tokens,
+          outputTokens: usage.completion_tokens,
+          metadata: { openingText: txt }
+        });
       }
 
       // Eleven TTS
@@ -722,6 +829,17 @@ Create a short spoken opening that:
           const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
           openingAudioBase64 = audioBuffer.toString("base64");
           openingAudioMime = "audio/mpeg";
+          
+          // Log ElevenLabs TTS cost
+          await logAPICost(client, {
+            clientId,
+            sessionId: createdSession.id,
+            provider: 'elevenlabs',
+            serviceType: 'tts',
+            model: 'eleven_flash_v2_5',
+            characters: openingText.length,
+            metadata: { voiceId }
+          });
         }
       }
     } catch (e) {
@@ -932,6 +1050,19 @@ Devam Planı (Koç Notu)
       const aiJson = await aiResp.json();
       const summaryText = aiJson.choices?.[0]?.message?.content?.trim() || "";
       if (!summaryText) throw new Error("Empty OpenAI summary");
+
+      // Log OpenAI cost for summary generation
+      const usage = aiJson.usage || {};
+      await logAPICost(db, {
+        clientId: sess.clientId,
+        sessionId,
+        provider: 'openai',
+        serviceType: 'summary_generation',
+        model: OPENAI_MODEL,
+        inputTokens: usage.prompt_tokens,
+        outputTokens: usage.completion_tokens,
+        metadata: { sessionNumber: sess.sessionNumber }
+      });
 
       // 6) DB: seansı bitir ve özeti yaz
       await db.query("BEGIN");
@@ -1350,6 +1481,26 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
           sttJson = await sttResp.json();
           userText = sttJson.text || sttJson.transcript || "";
           if (!userText || !userText.trim()) sttFailed = true;
+          
+          // Log ElevenLabs STT cost (only if successful)
+          if (!sttFailed && userText) {
+            // Get client_id from session
+            const { rows: sessionRows } = await client.query(
+              `SELECT client_id FROM session WHERE id = $1 LIMIT 1`,
+              [sessionId]
+            );
+            const clientId = sessionRows[0]?.client_id;
+            
+            await logAPICost(client, {
+              clientId,
+              sessionId,
+              provider: 'elevenlabs',
+              serviceType: 'stt',
+              model: 'scribe_v1',
+              characters: userText.length,
+              metadata: { transcript: userText }
+            });
+          }
         }
       } catch (_e) {
         sttFailed = true;
@@ -1401,6 +1552,25 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
 
             if (ttsResp.ok) {
               const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
+              
+              // Log ElevenLabs TTS cost (fallback)
+              const { rows: sessionRows } = await client.query(
+                `SELECT client_id FROM session WHERE id = $1 LIMIT 1`,
+                [sessionId]
+              );
+              const clientId = sessionRows[0]?.client_id;
+              
+              await logAPICost(client, {
+                clientId,
+                sessionId,
+                messageId: aiMessageId,
+                provider: 'elevenlabs',
+                serviceType: 'tts',
+                model: 'eleven_flash_v2_5',
+                characters: aiText.length,
+                metadata: { voiceId, fallback: true }
+              });
+              
               if (streamAudio) {
                 res.setHeader("Content-Type", "audio/mpeg");
                 res.setHeader("Content-Disposition", `inline; filename="reply.mp3"`);
@@ -1608,6 +1778,19 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
       const aiText = aiJson.choices?.[0]?.message?.content?.trim() || "";
       if (!aiText) throw new Error("Empty AI response");
 
+      // Log OpenAI cost
+      const usage = aiJson.usage || {};
+      await logAPICost(client, {
+        clientId: sessionData.clientId,
+        sessionId,
+        provider: 'openai',
+        serviceType: 'chat_completion',
+        model: OPENAI_MODEL,
+        inputTokens: usage.prompt_tokens,
+        outputTokens: usage.completion_tokens,
+        metadata: { messageCount: trimmed.length }
+      });
+
       console.log("open ai response: " + (Date.now() - timer));
       timer = Date.now();
 
@@ -1651,6 +1834,18 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
         throw new Error(`ElevenLabs TTS failed: ${ttsResp.status} ${txt}`);
       }
       const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
+
+      // Log ElevenLabs TTS cost
+      await logAPICost(client, {
+        clientId: sessionData.clientId,
+        sessionId,
+        messageId: aiMessageId,
+        provider: 'elevenlabs',
+        serviceType: 'tts',
+        model: 'eleven_flash_v2_5',
+        characters: aiText.length,
+        metadata: { voiceId: sessionData.therapist.voiceId }
+      });
 
       console.log("t2s: " + (Date.now() - timer));
       timer = Date.now();

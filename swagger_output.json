@@ -171,6 +171,16 @@
             "type": "string"
           },
           {
+            "name": "rowCount",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "type": "string"
+          },
+          {
             "name": "body",
             "in": "body",
             "schema": {
@@ -485,6 +495,11 @@
           {
             "name": "access-control-request-headers",
             "in": "header",
+            "type": "string"
+          },
+          {
+            "name": "language",
+            "in": "query",
             "type": "string"
           }
         ],
