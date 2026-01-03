@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Private Session Viewer</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background-color: #f5f5f5;
+      height: 100vh;
+      display: flex;
+      overflow: hidden;
+    }
+
+    .sidebar {
+      width: 300px;
+      background-color: #fff;
+      border-right: 1px solid #e0e0e0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sidebar-header {
+      padding: 20px;
+      border-bottom: 1px solid #e0e0e0;
+      background-color: #fafafa;
+    }
+
+    .sidebar-header h1 {
+      font-size: 18px;
+      color: #333;
+      margin-bottom: 5px;
+    }
+
+    .sidebar-header p {
+      font-size: 12px;
+      color: #666;
+    }
+
+    .session-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+    }
+
+    .session-item {
+      padding: 12px;
+      margin-bottom: 8px;
+      background-color: #f9f9f9;
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .session-item:hover {
+      background-color: #f0f0f0;
+      border-color: #ccc;
+    }
+
+    .session-item.active {
+      background-color: #e3f2fd;
+      border-color: #2196f3;
+    }
+
+    .session-id {
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      color: #333;
+      margin-bottom: 4px;
+      word-break: break-all;
+    }
+
+    .session-meta {
+      font-size: 11px;
+      color: #666;
+    }
+
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background-color: #fff;
+    }
+
+    .messages-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      background-color: #fafafa;
+    }
+
+    .message {
+      margin-bottom: 16px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .message.user {
+      align-items: flex-end;
+    }
+
+    .message.assistant {
+      align-items: flex-start;
+    }
+
+    .message-bubble {
+      max-width: 70%;
+      padding: 12px 16px;
+      border-radius: 18px;
+      word-wrap: break-word;
+    }
+
+    .message.user .message-bubble {
+      background-color: #2196f3;
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+
+    .message.assistant .message-bubble {
+      background-color: #e0e0e0;
+      color: #333;
+      border-bottom-left-radius: 4px;
+    }
+
+    .message-meta {
+      font-size: 11px;
+      color: #999;
+      margin-top: 4px;
+      padding: 0 4px;
+    }
+
+    .summary-container {
+      border-top: 2px solid #e0e0e0;
+      padding: 20px;
+      background-color: #fff;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .summary-container h2 {
+      font-size: 16px;
+      color: #333;
+      margin-bottom: 12px;
+    }
+
+    .summary-content {
+      font-size: 14px;
+      color: #555;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+
+    .loading {
+      padding: 20px;
+      text-align: center;
+      color: #999;
+    }
+
+    .error {
+      padding: 20px;
+      text-align: center;
+      color: #d32f2f;
+      background-color: #ffebee;
+      border-radius: 4px;
+      margin: 20px;
+    }
+
+    .empty-state {
+      padding: 40px;
+      text-align: center;
+      color: #999;
+    }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h1>Session Viewer</h1>
+      <p>Son 30 gün - Max 100 session</p>
+    </div>
+    <div class="session-list" id="sessionList">
+      <div class="loading">Yükleniyor...</div>
+    </div>
+  </div>
+
+  <div class="main-content">
+    <div class="messages-container" id="messagesContainer">
+      <div class="empty-state">Bir session seçin</div>
+    </div>
+    <div class="summary-container" id="summaryContainer" style="display: none;">
+      <h2>Session Özeti</h2>
+      <div class="summary-content" id="summaryContent"></div>
+    </div>
+  </div>
+
+  <script>
+    let currentSessionId = null;
+    let authHeader = null;
+
+    // Prompt for credentials on page load
+    function promptAuth() {
+      const username = prompt('Kullanıcı adı:');
+      const password = prompt('Şifre:');
+      if (username && password) {
+        authHeader = 'Basic ' + btoa(username + ':' + password);
+        loadSessions();
+      } else {
+        document.getElementById('sessionList').innerHTML = 
+          '<div class="error">Kimlik doğrulama gerekli</div>';
+      }
+    }
+
+    // Load sessions list
+    async function loadSessions() {
+      const sessionListEl = document.getElementById('sessionList');
+      sessionListEl.innerHTML = '<div class="loading">Yükleniyor...</div>';
+
+      try {
+        const response = await fetch('/api/private/sessions', {
+          headers: {
+            'Authorization': authHeader
+          }
+        });
+
+        if (response.status === 401) {
+          sessionListEl.innerHTML = '<div class="error">Kimlik doğrulama başarısız</div>';
+          setTimeout(promptAuth, 1000);
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error('Sessions yüklenemedi');
+        }
+
+        const sessions = await response.json();
+        
+        if (sessions.length === 0) {
+          sessionListEl.innerHTML = '<div class="empty-state">Session bulunamadı</div>';
+          return;
+        }
+
+        sessionListEl.innerHTML = sessions.map(session => `
+          <div class="session-item" data-session-id="${session.id}">
+            <div class="session-id">${session.id}</div>
+            <div class="session-meta">
+              ${new Date(session.created).toLocaleString('tr-TR')} • ${session.message_count} mesaj
+            </div>
+          </div>
+        `).join('');
+
+        // Add click handlers
+        document.querySelectorAll('.session-item').forEach(item => {
+          item.addEventListener('click', () => {
+            const sessionId = item.dataset.sessionId;
+            selectSession(sessionId);
+          });
+        });
+
+      } catch (error) {
+        console.error('Error loading sessions:', error);
+        sessionListEl.innerHTML = '<div class="error">Hata: ' + error.message + '</div>';
+      }
+    }
+
+    // Select and load a session
+    async function selectSession(sessionId) {
+      currentSessionId = sessionId;
+
+      // Update active state
+      document.querySelectorAll('.session-item').forEach(item => {
+        item.classList.remove('active');
+        if (item.dataset.sessionId === sessionId) {
+          item.classList.add('active');
+        }
+      });
+
+      const messagesContainer = document.getElementById('messagesContainer');
+      messagesContainer.innerHTML = '<div class="loading">Yükleniyor...</div>';
+
+      try {
+        const response = await fetch(`/api/private/sessions/${sessionId}/messages`, {
+          headers: {
+            'Authorization': authHeader
+          }
+        });
+
+        if (response.status === 401) {
+          messagesContainer.innerHTML = '<div class="error">Kimlik doğrulama başarısız</div>';
+          setTimeout(promptAuth, 1000);
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error('Messages yüklenemedi');
+        }
+
+        const data = await response.json();
+        const messages = data.messages || [];
+        const summary = data.summary || null;
+
+        if (messages.length === 0) {
+          messagesContainer.innerHTML = '<div class="empty-state">Bu session\'da mesaj bulunamadı</div>';
+        } else {
+          messagesContainer.innerHTML = messages.map(msg => {
+            const isUser = msg.is_client;
+            const sender = isUser ? 'User' : 'Assistant';
+            const date = new Date(msg.created).toLocaleString('tr-TR');
+            return `
+              <div class="message ${isUser ? 'user' : 'assistant'}">
+                <div class="message-bubble">${escapeHtml(msg.content)}</div>
+                <div class="message-meta">${sender} • ${date}</div>
+              </div>
+            `;
+          }).join('');
+        }
+
+        // Show summary if available
+        const summaryContainer = document.getElementById('summaryContainer');
+        const summaryContent = document.getElementById('summaryContent');
+        if (summary) {
+          summaryContent.textContent = summary;
+          summaryContainer.style.display = 'block';
+        } else {
+          summaryContainer.style.display = 'none';
+        }
+
+      } catch (error) {
+        console.error('Error loading messages:', error);
+        messagesContainer.innerHTML = '<div class="error">Hata: ' + error.message + '</div>';
+      }
+    }
+
+    // Escape HTML to prevent XSS
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Initialize on page load
+    promptAuth();
+  </script>
+</body>
+</html>
+

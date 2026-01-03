@@ -357,6 +357,31 @@ function fallbackUtterance(lang = DEFAULT_LANGUAGE) {
   const entry = getLanguageText(lang);
   return pick(entry.fallbackUtterances);
 }
+
+// Basic Authentication Middleware for Private Endpoints
+const PRIVATE_USERNAME = process.env.PRIVATE_USERNAME || 'admin';
+const PRIVATE_PASSWORD = process.env.PRIVATE_PASSWORD || 'admin123';
+
+function requirePrivateAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Basic ')) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Private Area"');
+    return res.status(401).json({ error: 'authentication_required' });
+  }
+  
+  const base64Credentials = authHeader.split(' ')[1];
+  const credentials = Buffer.from(base64Credentials, 'base64').toString('ascii');
+  const [username, password] = credentials.split(':');
+  
+  if (username === PRIVATE_USERNAME && password === PRIVATE_PASSWORD) {
+    return next();
+  }
+  
+  res.setHeader('WWW-Authenticate', 'Basic realm="Private Area"');
+  return res.status(401).json({ error: 'authentication_failed' });
+}
+
 //
 
 app.use(express.json()); // JSON body okumak için
@@ -2980,6 +3005,72 @@ app.use(
     swaggerOptions: { url: '/openapi.json' }
   })
 );
+
+// Private Session Viewer Endpoints
+// GET /api/private/sessions - List recent sessions with message counts
+app.get("/api/private/sessions", requirePrivateAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT 
+        s.id,
+        s.created,
+        COUNT(m.id) AS message_count
+      FROM session s
+      LEFT JOIN message m ON m.session_id = s.id
+      WHERE s.created >= NOW() - INTERVAL '30 days'
+        AND (s.deleted IS NULL OR s.deleted = FALSE)
+      GROUP BY s.id
+      ORDER BY s.created DESC
+      LIMIT 100
+      `
+    );
+    return res.status(200).json(rows);
+  } catch (err) {
+    console.error("list private sessions error:", err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// GET /api/private/sessions/:sessionId/messages - Get session messages and summary
+app.get("/api/private/sessions/:sessionId/messages", requirePrivateAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    // Get messages
+    const { rows: messageRows } = await pool.query(
+      `
+      SELECT id, created, is_client, content
+      FROM message
+      WHERE session_id = $1
+      ORDER BY created ASC, is_client DESC
+      `,
+      [sessionId]
+    );
+    
+    // Get summary
+    const { rows: sessionRows } = await pool.query(
+      `SELECT summary FROM session WHERE id = $1 LIMIT 1`,
+      [sessionId]
+    );
+    
+    const summary = sessionRows[0]?.summary || null;
+    
+    return res.status(200).json({
+      messages: messageRows,
+      summary: summary
+    });
+  } catch (err) {
+    console.error("get private session messages error:", err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// GET /private.html - Serve the private viewer page
+app.get("/private.html", (req, res) => {
+  const htmlPath = path.join(__dirname, "public", "private.html");
+  res.sendFile(htmlPath);
+});
 
 app.listen(PORT, () => {
   console.log(`Example app listening on port ${PORT}`)
