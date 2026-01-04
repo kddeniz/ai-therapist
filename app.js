@@ -3015,6 +3015,7 @@ app.get("/api/private/sessions", requirePrivateAuth, async (req, res) => {
       LEFT JOIN message m ON m.session_id = s.id
       WHERE s.created >= NOW() - INTERVAL '30 days'
         AND (s.deleted IS NULL OR s.deleted = FALSE)
+        AND s.client_id != 'e3c682d7-9df7-4afe-94d7-19bde8120339'
       GROUP BY s.id
       ORDER BY s.created DESC
       LIMIT 100
