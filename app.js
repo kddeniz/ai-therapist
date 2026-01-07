@@ -13,6 +13,7 @@ const express = require("express");
 const { Pool } = require("pg");
 const PORT = process.env.PORT || 3000;
 const { v4: uuidv4 } = require("uuid"); // uuid kütüphanesini ekleyin (npm install uuid)
+const { parseBuffer } = require('music-metadata');
 const app = express();
 const swaggerUi = require('swagger-ui-express')
 
@@ -877,6 +878,15 @@ Create a short spoken opening that:
           openingAudioBase64 = audioBuffer.toString("base64");
           openingAudioMime = "audio/mpeg";
           
+          // Calculate audio duration
+          let audioDurationSeconds = null;
+          try {
+            const metadata = await parseBuffer(audioBuffer);
+            audioDurationSeconds = metadata.format.duration || null;
+          } catch (err) {
+            console.warn("Failed to parse opening TTS audio duration:", err);
+          }
+          
           // Log ElevenLabs TTS cost
           await logAPICost(client, {
             clientId,
@@ -885,7 +895,8 @@ Create a short spoken opening that:
             serviceType: 'tts',
             model: 'eleven_flash_v2_5',
             characters: openingText.length,
-            metadata: { voiceId }
+            audioDurationSeconds: audioDurationSeconds,
+            metadata: { voiceId, duration: audioDurationSeconds }
           });
         }
       }
@@ -1523,26 +1534,6 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
           sttJson = await sttResp.json();
           userText = sttJson.text || sttJson.transcript || "";
           if (!userText || !userText.trim()) sttFailed = true;
-          
-          // Log ElevenLabs STT cost (only if successful)
-          if (!sttFailed && userText) {
-            // Get client_id from session
-            const { rows: sessionRows } = await client.query(
-              `SELECT client_id FROM session WHERE id = $1 LIMIT 1`,
-              [sessionId]
-            );
-            const clientId = sessionRows[0]?.client_id;
-            
-            await logAPICost(client, {
-              clientId,
-              sessionId,
-              provider: 'elevenlabs',
-              serviceType: 'stt',
-              model: 'scribe_v1',
-              characters: userText.length,
-              metadata: { transcript: userText }
-            });
-          }
         }
       } catch (_e) {
         sttFailed = true;
@@ -1595,6 +1586,15 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
             if (ttsResp.ok) {
               const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
               
+              // Calculate audio duration
+              let audioDurationSeconds = null;
+              try {
+                const metadata = await parseBuffer(audioBuffer);
+                audioDurationSeconds = metadata.format.duration || null;
+              } catch (err) {
+                console.warn("Failed to parse fallback TTS audio duration:", err);
+              }
+              
               // Log ElevenLabs TTS cost (fallback)
               const { rows: sessionRows } = await client.query(
                 `SELECT client_id FROM session WHERE id = $1 LIMIT 1`,
@@ -1610,7 +1610,8 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
                 serviceType: 'tts',
                 model: 'eleven_flash_v2_5',
                 characters: aiText.length,
-                metadata: { voiceId, fallback: true }
+                audioDurationSeconds: audioDurationSeconds,
+                metadata: { voiceId, fallback: true, duration: audioDurationSeconds }
               });
               
               if (streamAudio) {
@@ -1662,6 +1663,36 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
         userText,
       ]);
       const userMessageId = userRows[0].id;
+
+      // Log ElevenLabs STT cost (after user message is saved, so we have messageId)
+      if (!sttFailed && userText) {
+        // Calculate audio duration
+        let audioDurationSeconds = null;
+        try {
+          const metadata = await parseBuffer(req.file.buffer);
+          audioDurationSeconds = metadata.format.duration || null;
+        } catch (err) {
+          console.warn("Failed to parse audio duration:", err);
+        }
+
+        const { rows: sessionRows } = await client.query(
+          `SELECT client_id FROM session WHERE id = $1 LIMIT 1`,
+          [sessionId]
+        );
+        const clientId = sessionRows[0]?.client_id;
+        
+        await logAPICost(client, {
+          clientId,
+          sessionId,
+          messageId: userMessageId,
+          provider: 'elevenlabs',
+          serviceType: 'stt',
+          model: 'scribe_v1',
+          audioDurationSeconds: audioDurationSeconds,
+          characters: null,
+          metadata: { transcript: userText, duration: audioDurationSeconds }
+        });
+      }
 
       console.log("insert user msg to db: " + (Date.now() - timer));
       timer = Date.now();
@@ -1820,19 +1851,6 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
       const aiText = aiJson.choices?.[0]?.message?.content?.trim() || "";
       if (!aiText) throw new Error("Empty AI response");
 
-      // Log OpenAI cost
-      const usage = aiJson.usage || {};
-      await logAPICost(client, {
-        clientId: sessionData.clientId,
-        sessionId,
-        provider: 'openai',
-        serviceType: 'chat_completion',
-        model: OPENAI_MODEL,
-        inputTokens: usage.prompt_tokens,
-        outputTokens: usage.completion_tokens,
-        metadata: { messageCount: trimmed.length }
-      });
-
       console.log("open ai response: " + (Date.now() - timer));
       timer = Date.now();
 
@@ -1848,6 +1866,20 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
         aiText,
       ]);
       const aiMessageId = aiRows[0].id;
+
+      // Log OpenAI cost (after AI message is saved, so we have messageId)
+      const usage = aiJson.usage || {};
+      await logAPICost(client, {
+        clientId: sessionData.clientId,
+        sessionId,
+        messageId: aiMessageId,
+        provider: 'openai',
+        serviceType: 'chat_completion',
+        model: OPENAI_MODEL,
+        inputTokens: usage.prompt_tokens,
+        outputTokens: usage.completion_tokens,
+        metadata: { messageCount: trimmed.length }
+      });
 
       await client.query("COMMIT");
 
@@ -1877,6 +1909,15 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
       }
       const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
 
+      // Calculate audio duration
+      let audioDurationSeconds = null;
+      try {
+        const metadata = await parseBuffer(audioBuffer);
+        audioDurationSeconds = metadata.format.duration || null;
+      } catch (err) {
+        console.warn("Failed to parse TTS audio duration:", err);
+      }
+
       // Log ElevenLabs TTS cost
       await logAPICost(client, {
         clientId: sessionData.clientId,
@@ -1886,7 +1927,8 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
         serviceType: 'tts',
         model: 'eleven_flash_v2_5',
         characters: aiText.length,
-        metadata: { voiceId: sessionData.therapist.voiceId }
+        audioDurationSeconds: audioDurationSeconds,
+        metadata: { voiceId: sessionData.therapist.voiceId, duration: audioDurationSeconds }
       });
 
       console.log("t2s: " + (Date.now() - timer));
