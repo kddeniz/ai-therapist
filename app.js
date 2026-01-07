@@ -36,6 +36,9 @@ const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"; // Response
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const CDN_BASE_URL = "https://numamind.b-cdn.net/voices";
 
+// Trial period configuration (days)
+const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || '7', 10);
+
 // API Cost Tracking - Pricing Configuration
 // Note: Update these prices according to current API documentation
 const OPENAI_PRICING = {
@@ -616,8 +619,8 @@ app.post("/sessions", async (req, res) => {
       inFreeTrial = true;
     } else {
       const msCreated = new Date(msExist[0].created);
-      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      inFreeTrial = msCreated >= sevenDaysAgo;
+      const trialDaysAgo = new Date(Date.now() - TRIAL_DAYS * 24 * 60 * 60 * 1000);
+      inFreeTrial = msCreated >= trialDaysAgo;
     }
 
     if (forcePaywall) {
@@ -701,7 +704,7 @@ app.post("/sessions", async (req, res) => {
       ? {
         active: true,
         days_left:
-          7 -
+          TRIAL_DAYS -
           Math.floor(
             (Date.now() -
               (msExist[0]?.created ? new Date(msExist[0].created) : new Date())) /
@@ -1182,9 +1185,9 @@ app.post("/admin/clients/:clientId/mock-trial-expired",
 
       await db.query("COMMIT");
 
-      // “trial aktif mi?” basit hesap
+      // "trial aktif mi?" basit hesap
       const created = new Date(row.created);
-      const trialActive = (Date.now() - created.getTime()) < (7 * 24 * 60 * 60 * 1000);
+      const trialActive = (Date.now() - created.getTime()) < (TRIAL_DAYS * 24 * 60 * 60 * 1000);
 
       return res.status(200).json({
         clientId,
