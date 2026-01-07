@@ -541,6 +541,25 @@ app.post("/clients", async (req, res) => {
   }
 });
 
+// GET /config - Uygulama konfigürasyon parametreleri (public)
+app.get("/config",
+  /*
+    #swagger.tags = ['Config']
+    #swagger.summary = 'Uygulama konfigürasyon parametrelerini döner'
+    #swagger.responses[200] = { description: 'OK' }
+  */
+  async (_req, res) => {
+    try {
+      return res.status(200).json({
+        trial_days: TRIAL_DAYS
+      });
+    } catch (err) {
+      console.error("get config error:", err);
+      return res.status(500).json({ error: "internal_error" });
+    }
+  }
+);
+
 // Tüm client'lar (created DESC)
 app.get("/clients",
   /*
