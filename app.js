@@ -657,10 +657,21 @@ app.post("/sessions", async (req, res) => {
           AND (
             (
               raw_payload IS NOT NULL
-              AND COALESCE(
-                    NULLIF((raw_payload::jsonb -> 'subscription'  ->> 'expiresDate'), ''),
+              AND (
+                -- RevenueCat formatı: event.expiration_at_ms (milisaniye timestamp)
+                (
+                  (raw_payload::jsonb -> 'event' ->> 'expiration_at_ms') IS NOT NULL
+                  AND to_timestamp((raw_payload::jsonb -> 'event' ->> 'expiration_at_ms')::bigint / 1000) >= NOW()
+                )
+                OR
+                -- Eski format: subscription.expiresDate veya customerInfo.latestExpirationDate
+                (
+                  COALESCE(
+                    NULLIF((raw_payload::jsonb -> 'subscription' ->> 'expiresDate'), ''),
                     (raw_payload::jsonb -> 'customerInfo' ->> 'latestExpirationDate')
                   )::timestamptz >= NOW()
+                )
+              )
             )
             OR (
               raw_payload IS NULL
