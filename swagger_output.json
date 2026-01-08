@@ -538,20 +538,43 @@
         "responses": {
           "200": {
             "description": "Ses örneği bulundu",
-            "content": {
-              "application/json": {
-                "schema": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "example": "object"
+                },
+                "properties": {
                   "type": "object",
                   "properties": {
                     "therapistId": {
-                      "type": "string",
-                      "format": "uuid"
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "string"
+                        },
+                        "format": {
+                          "type": "string",
+                          "example": "uuid"
+                        }
+                      }
                     },
-                    "audioPreviewUrl": {
-                      "type": "string"
+                    "audioUrl": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "example": "string"
+                        }
+                      }
                     }
                   }
                 }
+              },
+              "xml": {
+                "name": "main"
               }
             }
           },

@@ -93,7 +93,7 @@ async function logAPICost(db, {
   metadata = null
 }) {
   let cost = 0;
-  
+
   if (provider === 'openai') {
     cost = calculateOpenAICost(model, inputTokens || 0, outputTokens || 0);
   } else if (provider === 'elevenlabs') {
@@ -103,7 +103,7 @@ async function logAPICost(db, {
       cost = calculateElevenLabsSTTCost(model, audioDurationSeconds || 0);
     }
   }
-  
+
   try {
     await db.query(
       `
@@ -368,20 +368,20 @@ const PRIVATE_PASSWORD = process.env.PRIVATE_PASSWORD || 'admin123';
 
 function requirePrivateAuth(req, res, next) {
   const authHeader = req.headers.authorization;
-  
+
   if (!authHeader || !authHeader.startsWith('Basic ')) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Private Area"');
     return res.status(401).json({ error: 'authentication_required' });
   }
-  
+
   const base64Credentials = authHeader.split(' ')[1];
   const credentials = Buffer.from(base64Credentials, 'base64').toString('ascii');
   const [username, password] = credentials.split(':');
-  
+
   if (username === PRIVATE_USERNAME && password === PRIVATE_PASSWORD) {
     return next();
   }
-  
+
   res.setHeader('WWW-Authenticate', 'Basic realm="Private Area"');
   return res.status(401).json({ error: 'authentication_failed' });
 }
@@ -853,7 +853,7 @@ Create a short spoken opening that:
         const aiJson = await aiResp.json();
         const txt = aiJson.choices?.[0]?.message?.content?.trim();
         if (txt) openingText = txt;
-        
+
         // Log OpenAI cost
         const usage = aiJson.usage || {};
         await logAPICost(client, {
@@ -888,7 +888,7 @@ Create a short spoken opening that:
           const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
           openingAudioBase64 = audioBuffer.toString("base64");
           openingAudioMime = "audio/mpeg";
-          
+
           // Calculate audio duration
           let audioDurationSeconds = null;
           try {
@@ -897,7 +897,7 @@ Create a short spoken opening that:
           } catch (err) {
             console.warn("Failed to parse opening TTS audio duration:", err);
           }
-          
+
           // Log ElevenLabs TTS cost
           await logAPICost(client, {
             clientId,
@@ -1596,7 +1596,7 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
 
             if (ttsResp.ok) {
               const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
-              
+
               // Calculate audio duration
               let audioDurationSeconds = null;
               try {
@@ -1605,14 +1605,14 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
               } catch (err) {
                 console.warn("Failed to parse fallback TTS audio duration:", err);
               }
-              
+
               // Log ElevenLabs TTS cost (fallback)
               const { rows: sessionRows } = await client.query(
                 `SELECT client_id FROM session WHERE id = $1 LIMIT 1`,
                 [sessionId]
               );
               const clientId = sessionRows[0]?.client_id;
-              
+
               await logAPICost(client, {
                 clientId,
                 sessionId,
@@ -1624,7 +1624,7 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
                 audioDurationSeconds: audioDurationSeconds,
                 metadata: { voiceId, fallback: true, duration: audioDurationSeconds }
               });
-              
+
               if (streamAudio) {
                 res.setHeader("Content-Type", "audio/mpeg");
                 res.setHeader("Content-Disposition", `inline; filename="reply.mp3"`);
@@ -1691,7 +1691,7 @@ app.post("/sessions/:sessionId/messages/audio", upload.single("audio"),
           [sessionId]
         );
         const clientId = sessionRows[0]?.client_id;
-        
+
         await logAPICost(client, {
           clientId,
           sessionId,
@@ -2047,21 +2047,21 @@ app.get("/therapists/:therapistId/voice-preview",
     #swagger.parameters['therapistId'] = {
       in: 'path', required: true, type: 'string', format: 'uuid'
     }
+
     #swagger.responses[200] = {
       description: 'Ses örneği bulundu',
-      content: {
-        "application/json": {
-          schema: {
-            type: "object",
-            properties: {
-              therapistId: { type: "string", format: "uuid" },
-              audioPreviewUrl: { type: "string" }
-            }
-          }
+      schema: {
+        type: "object",
+        properties: {
+          therapistId: { type: "string", format: "uuid" },
+          audioUrl: { type: "string" }
         }
       }
     }
-    #swagger.responses[404] = { description: 'Terapist veya ses örneği bulunamadı' }
+
+    #swagger.responses[404] = {
+      description: 'Terapist veya ses örneği bulunamadı'
+    }
   */
   async (req, res) => {
     try {
@@ -3107,7 +3107,7 @@ app.get("/api/private/sessions", requirePrivateAuth, async (req, res) => {
 app.get("/api/private/sessions/:sessionId/messages", requirePrivateAuth, async (req, res) => {
   try {
     const { sessionId } = req.params;
-    
+
     // Get messages
     const { rows: messageRows } = await pool.query(
       `
@@ -3118,15 +3118,15 @@ app.get("/api/private/sessions/:sessionId/messages", requirePrivateAuth, async (
       `,
       [sessionId]
     );
-    
+
     // Get summary
     const { rows: sessionRows } = await pool.query(
       `SELECT summary FROM session WHERE id = $1 LIMIT 1`,
       [sessionId]
     );
-    
+
     const summary = sessionRows[0]?.summary || null;
-    
+
     return res.status(200).json({
       messages: messageRows,
       summary: summary
