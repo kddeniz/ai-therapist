@@ -21,6 +21,11 @@ const swaggerUi = require('swagger-ui-express')
 const SKIP_PAYWALL_USER = 'gilfoyledinesh';
 const FORCE_PAYWALL_USER = 'dineshgilfoyle';
 
+// Free client IDs (paywall ve trial bypass)
+const FREE_CLIENT_IDS = [
+  '7128c32f-6d19-4e7a-94b5-fb7ce4a96157'
+];
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL ? { rejectUnauthorized: false } : false
@@ -619,7 +624,7 @@ app.post("/sessions", async (req, res) => {
     }
 
     const uname = String(cRows[0].username || "").toLowerCase();
-    const skipPaywall = uname === SKIP_PAYWALL_USER;
+    const skipPaywall = uname === SKIP_PAYWALL_USER || FREE_CLIENT_IDS.includes(clientId);
     const forcePaywall = uname === FORCE_PAYWALL_USER;
 
     const clientLanguage = normalizeLanguage(cRows[0].language);
@@ -645,6 +650,11 @@ app.post("/sessions", async (req, res) => {
 
     if (forcePaywall) {
       inFreeTrial = false;
+    }
+
+    // Free client IDs için trial'ı da bypass et
+    if (FREE_CLIENT_IDS.includes(clientId)) {
+      inFreeTrial = true;
     }
 
     // 1) ÖDEME KONTROLÜ (trial değilse, bypass yoksa)
